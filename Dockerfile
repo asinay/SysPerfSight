@@ -7,7 +7,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY app.py pbuttons_parser.py ./
+COPY app.py sysperfsight_parser.py ./
 COPY analyzers/ ./analyzers/
 COPY static/ ./static/
 
