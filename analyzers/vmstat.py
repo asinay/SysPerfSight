@@ -123,35 +123,36 @@ async def analyze(section_text: str) -> str:
 
     if has_runq:
         r_avg = df['r'].mean()
-        r_max = df['r'].max()
+        r_p99 = df['r'].quantile(0.99)
         if r_avg > 8:
             flags.append(_flag('red',
-                f'<b>CPU run queue saturation</b>: avg {r_avg:.1f}, peak {r_max:.0f} — '
+                f'<b>CPU run queue saturation</b>: avg {r_avg:.1f}, p99 peak {r_p99:.0f} — '
                 f'threads are waiting for CPU. Correlate with mgstat Rourefs/Glorefs drops.'))
         elif r_avg > 4:
             flags.append(_flag('amber',
-                f'<b>Elevated run queue</b>: avg {r_avg:.1f}, peak {r_max:.0f}.'))
+                f'<b>Elevated run queue</b>: avg {r_avg:.1f}, p99 peak {r_p99:.0f}.'))
 
     if has_blocked:
         b_avg = df['b'].mean()
+        b_p99 = df['b'].quantile(0.99)
         b_max = df['b'].max()
         if b_avg > 2:
             flags.append(_flag('red',
-                f'<b>Processes blocked on I/O</b>: avg {b_avg:.1f}, peak {b_max:.0f} — '
+                f'<b>Processes blocked on I/O</b>: avg {b_avg:.1f}, p99 peak {b_p99:.0f} (max {b_max:.0f}) — '
                 f'storage cannot keep up. Cross-reference with iostat %util and sar -d await.'))
-        elif b_max > 4:
+        elif b_p99 > 4:
             flags.append(_flag('amber',
-                f'<b>Intermittent I/O blocking</b>: peak {b_max:.0f} blocked processes.'))
+                f'<b>Intermittent I/O blocking</b>: p99 peak {b_p99:.0f} blocked processes (single-sample max {b_max:.0f}).'))
 
     if has_cpu:
         wa_avg = df['wa'].mean()
-        wa_max = df['wa'].max()
+        wa_p99 = df['wa'].quantile(0.99)
         if wa_avg > 20:
             flags.append(_flag('red',
-                f'<b>High CPU iowait</b>: avg {wa_avg:.1f}%, peak {wa_max:.1f}% — storage bottleneck.'))
+                f'<b>High CPU iowait</b>: avg {wa_avg:.1f}%, p99 peak {wa_p99:.1f}% — storage bottleneck.'))
         elif wa_avg > 10:
             flags.append(_flag('amber',
-                f'<b>Elevated CPU iowait</b>: avg {wa_avg:.1f}%, peak {wa_max:.1f}%.'))
+                f'<b>Elevated CPU iowait</b>: avg {wa_avg:.1f}%, p99 peak {wa_p99:.1f}%.'))
 
     if not flags:
         flags.append(_flag('green', 'No memory pressure or run queue saturation detected.'))
@@ -186,11 +187,16 @@ async def analyze(section_text: str) -> str:
 
     # ── Charts ────────────────────────────────────────────────────────────────
     row_defs = []  # (title, list of (col, color, name))
+    ref_lines: dict[int, list[tuple]] = {}  # row_idx -> [(y, color, label)]
 
     if has_runq or has_blocked:
         traces = []
         if has_runq:
             traces.append(('r', '#0055aa', 'run queue (r)'))
+            ref_lines[len(row_defs) + 1] = [
+                (8, '#dc2626', 'run queue saturated (8)'),
+                (4, '#d97706', 'elevated run queue (4)'),
+            ]
         if has_blocked:
             traces.append(('b', '#e74c3c', 'blocked (b)'))
         row_defs.append(('CPU Run Queue & Blocked Processes', 'processes', traces))
@@ -202,6 +208,7 @@ async def analyze(section_text: str) -> str:
         ]))
 
     if has_cpu:
+        ref_lines[len(row_defs) + 1] = [(80, '#d97706', '80% busy (20% idle)')]
         row_defs.append(('CPU Breakdown (%)', '%', [
             ('wa', '#e74c3c', '%iowait'),
             ('us', '#0055aa', '%user'),
@@ -235,6 +242,15 @@ async def analyze(section_text: str) -> str:
         fig.update_yaxes(title_text=ylabel, showgrid=True,
                          gridcolor='#e8edf5', rangemode='tozero',
                          row=row_idx, col=1)
+
+    for row_idx, lines in ref_lines.items():
+        for y, color, label in lines:
+            fig.add_hline(
+                y=y, row=row_idx, col=1,
+                line=dict(color=color, width=1, dash='dash'),
+                annotation_text=label, annotation_position='top left',
+                annotation_font=dict(size=9, color=color), opacity=0.7,
+            )
 
     fig.update_layout(
         height=240 * nrows,

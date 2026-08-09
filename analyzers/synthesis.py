@@ -12,6 +12,8 @@ The summary is rendered as collapsible subsections so the user can expand
 only what interests them, with a top-level signal strip (green/amber/red
 pills) giving an at-a-glance health overview.
 """
+import io
+import csv
 import re
 
 
@@ -185,11 +187,170 @@ def _analyse_memory(texts: dict) -> tuple[str, str] | None:
     return level, ''.join(html for _, html in signals)
 
 
+def _parse_cpf_database_dirs(cpf_text: str) -> list[str]:
+    """Extract normalised directory paths from a CPF file's [Databases] section."""
+    dirs = []
+    in_databases = False
+    for line in cpf_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r'^\[(.+?)\]$', line)
+        if m:
+            in_databases = (m.group(1).strip().lower() == 'databases')
+            continue
+        if in_databases and '=' in line:
+            _, _, val = line.partition('=')
+            path = val.split(',')[0].strip()
+            if path:
+                dirs.append(path.rstrip('/\\').lower())
+    return dirs
+
+
+def _parse_mount_devices(mount_text: str) -> list[tuple[str, str]]:
+    """Return (mountpoint, device) pairs from a Linux 'mount' section."""
+    pairs = []
+    for ln in mount_text.splitlines():
+        m = re.match(r'(.+?) on (/\S*) type (\S+) \(', ln)
+        if not m:
+            continue
+        device, mp, _ = m.groups()
+        pairs.append((mp, device.strip()))
+    return pairs
+
+
+def _resolve_iris_devices(cpf_dirs: list[str], mount_pairs: list[tuple[str, str]]) -> set[str]:
+    """Map each CPF database directory to its backing device via longest mountpoint-prefix match.
+
+    Only applies on Linux (CPF dirs are Windows drive paths there, and there's no
+    'mount' section to cross-reference against) — silently returns empty otherwise.
+    """
+    devices = set()
+    sorted_mounts = sorted(mount_pairs, key=lambda p: -len(p[0]))
+    for d in cpf_dirs:
+        if not d.startswith('/'):
+            continue
+        for mp, device in sorted_mounts:
+            mp_norm = mp.lower().rstrip('/')
+            if d == mp_norm or d.startswith(mp_norm + '/'):
+                devices.add(device.rsplit('/', 1)[-1])
+                break
+    return devices
+
+
+def _is_cpf_iris_mountpoint(mp: str, cpf_dirs: list[str]) -> bool:
+    """True if a CPF-declared database directory lives at or under this mountpoint."""
+    mp_norm = mp.lower().rstrip('/')
+    return any(d == mp_norm or d.startswith(mp_norm + '/') for d in cpf_dirs)
+
+
+def _resolve_iris_drive_letters(cpf_dirs: list[str]) -> set[str]:
+    """Extract Windows drive letters (e.g. 'd:') from CPF database directories.
+
+    _parse_cpf_database_dirs only lowercases and strips the trailing slash, so a
+    Windows path like 'D:\\CacheSys\\mgr\\' arrives here as 'd:\\cachesys\\mgr' —
+    the leading 'd:' is all this needs, regardless of slash direction.
+    """
+    letters = set()
+    for d in cpf_dirs:
+        m = re.match(r'^([a-z]):', d)
+        if m:
+            letters.add(m.group(1) + ':')
+    return letters
+
+
+def _parse_perfmon_disk_busy(text: str) -> list[tuple[str, float]]:
+    """Return (drive_instance, %Disk Time) pairs from raw Windows perfmon PDH-CSV text."""
+    lines = text.splitlines()
+    header_idx = next((i for i, ln in enumerate(lines) if 'PDH-CSV' in ln), None)
+    if header_idx is None:
+        return []
+    try:
+        reader = csv.reader(io.StringIO('\n'.join(lines[header_idx:])))
+        headers = next(reader)
+    except Exception:
+        return []
+
+    disk_cols = []  # (col_idx, instance)
+    for i, h in enumerate(headers[1:], start=1):
+        parts = [p for p in h.split('\\') if p]
+        if len(parts) < 2:
+            continue
+        m = re.match(r'([^(]+)(?:\((.*)\))?', parts[-2])
+        if not m or 'physicaldisk' not in m.group(1).strip().lower():
+            continue
+        if '% disk time' not in parts[-1].lower():
+            continue
+        instance = (m.group(2) or '').strip()
+        if instance:
+            disk_cols.append((i, instance))
+    if not disk_cols:
+        return []
+
+    pairs = []
+    for row in reader:
+        for col_idx, instance in disk_cols:
+            if col_idx < len(row):
+                try:
+                    pairs.append((instance, float(row[col_idx].strip())))
+                except (ValueError, AttributeError):
+                    pass
+    return pairs
+
+
+def _parse_device_util(text: str, sid: str) -> list[tuple[str, float]]:
+    """Return (device, %util) pairs from raw iostat or sar -d text."""
+    pairs = []
+    if sid == 'iostat':
+        for ln in text.splitlines():
+            parts = ln.split()
+            if len(parts) < 2 or parts[0] in ('avg-cpu:', 'Device'):
+                continue
+            try:
+                float(parts[0])
+                continue  # numeric first field means this is the avg-cpu values row, not a device row
+            except ValueError:
+                pass
+            try:
+                u = float(parts[-1])
+            except ValueError:
+                continue
+            if 0 <= u <= 100:
+                pairs.append((parts[0], u))
+    elif sid == 'sar-d':
+        # Timestamp is 1-2 tokens (HH:MM:SS with optional AM/PM) — match it as a
+        # single unit so the device (next token) doesn't shift depending on locale.
+        line_re = re.compile(r'^\d{2}:\d{2}:\d{2}(?:\s*[AP]M)?\s+(\S+)\s+(.+)$', re.IGNORECASE)
+        for ln in text.splitlines():
+            m = line_re.match(ln.strip())
+            if not m:
+                continue
+            dev = m.group(1)
+            if dev.upper() == 'DEV':
+                continue
+            values = m.group(2).split()
+            if not values:
+                continue
+            try:
+                u = float(values[-1])
+            except ValueError:
+                continue
+            if 0 <= u <= 100:
+                pairs.append((dev, u))
+    return pairs
+
+
 def _analyse_disk(texts: dict) -> tuple[str, str] | None:
     """Combine df -m + mount + iostat/sar-d. Groups findings to avoid one pill per filesystem."""
     pills = []  # (level, rendered_html)
 
     _IRIS_TAGS = ('iris', 'hs-', '/db', '/jrn', '/sys', '/mgr')
+    cpf_dirs = _parse_cpf_database_dirs(texts.get('CPFfile', ''))
+    mount_pairs = _parse_mount_devices(texts.get('mount', ''))
+    iris_devices = _resolve_iris_devices(cpf_dirs, mount_pairs)
+
+    def _is_iris_mp(mp: str) -> bool:
+        return (cpf_dirs and _is_cpf_iris_mountpoint(mp, cpf_dirs)) or any(p in mp.lower() for p in _IRIS_TAGS)
 
     # ── df -m: group near-full filesystems ────────────────────────────────────
     df_text = texts.get('df-m', '')
@@ -203,7 +364,7 @@ def _analyse_disk(texts: dict) -> tuple[str, str] | None:
                 continue
             pct = int(m.group(1))
             mp  = m.group(2)
-            iris = any(p in mp.lower() for p in _IRIS_TAGS)
+            iris = _is_iris_mp(mp)
             parts = ln.split()
             used_mb = total_mb = None
             if len(parts) >= 5:
@@ -262,7 +423,7 @@ def _analyse_disk(texts: dict) -> tuple[str, str] | None:
                 continue
             if 'soft' not in opts.split(','):
                 continue
-            iris = any(p in mp.lower() for p in _IRIS_TAGS)
+            iris = _is_iris_mp(mp)
             (soft_iris if iris else soft_other).append((mp, fstype))
 
     if soft_iris:
@@ -283,33 +444,47 @@ def _analyse_disk(texts: dict) -> tuple[str, str] | None:
             items,
             'Source: mount &middot; option: soft')))
 
-    # ── iostat / sar-d: peak %util ─────────────────────────────────────────────
+    # ── iostat / sar-d: peak %util, scoped to IRIS-relevant disks when CPF+mount let us map them ──
     for sid in ('iostat', 'sar-d'):
         t = texts.get(sid, '')
         if not t:
             continue
-        utils = []
-        for ln in t.splitlines():
-            parts = ln.split()
-            if not parts or parts[0] in ('avg-cpu:', 'Device', 'Average:'):
-                continue
-            try:
-                u = float(parts[-1])
-                if 0 <= u <= 100:
-                    utils.append(u)
-            except ValueError:
-                pass
-        if utils:
-            pk = max(utils)
-            ev = (f'Source: <b>{sid}</b> &mdash; %util peak&nbsp;=&nbsp;{pk:.0f}%'
-                  f' across {len(utils)} data points &middot; threshold: ≥90% → red, ≥70% → amber')
+        dev_utils = _parse_device_util(t, sid)
+        if not dev_utils:
+            continue
+        scoped = [(d, u) for d, u in dev_utils if d in iris_devices] if iris_devices else []
+        use = scoped if scoped else dev_utils
+        scope_note = f' — scoped to IRIS disk(s) {", ".join(sorted(iris_devices))}' if scoped else ''
+        pk = max(u for _, u in use)
+        ev = (f'Source: <b>{sid}</b> &mdash; %util peak&nbsp;=&nbsp;{pk:.0f}%'
+              f' across {len(use)} data points{scope_note} &middot; threshold: ≥90% → red, ≥70% → amber')
+        if pk >= 90:
+            pills.append(('red', _pill('red',
+                f'<b>Disk saturation detected</b> ({sid}){scope_note}: peak {pk:.0f}% util. Check {sid} section for device breakdown.', ev)))
+        elif pk >= 70:
+            pills.append(('amber', _pill('amber',
+                f'<b>High disk utilisation</b> ({sid}){scope_note}: peak {pk:.0f}% util.', ev)))
+        break
+
+    # ── perfmon (Windows): peak %Disk Time, scoped to IRIS drive letters via CPF ──
+    perfmon_text = texts.get('perfmon', '')
+    if perfmon_text:
+        drive_utils = _parse_perfmon_disk_busy(perfmon_text)
+        if drive_utils:
+            iris_letters = _resolve_iris_drive_letters(cpf_dirs)
+            scoped = [(inst, u) for inst, u in drive_utils
+                      if any(letter in inst.lower().split() for letter in iris_letters)] if iris_letters else []
+            use = scoped if scoped else drive_utils
+            scope_note = f' — scoped to IRIS drive(s) {", ".join(sorted(iris_letters))}' if scoped else ''
+            pk = max(u for _, u in use)
+            ev = (f'Source: <b>perfmon</b> &mdash; %Disk Time peak&nbsp;=&nbsp;{pk:.0f}%'
+                  f' across {len(use)} data points{scope_note} &middot; threshold: ≥90% → red, ≥70% → amber')
             if pk >= 90:
                 pills.append(('red', _pill('red',
-                    f'<b>Disk saturation detected</b> ({sid}): peak {pk:.0f}% util. Check {sid} section for device breakdown.', ev)))
+                    f'<b>Disk saturation detected</b> (perfmon){scope_note}: peak {pk:.0f}% Disk Time. Check perfmon section for drive breakdown.', ev)))
             elif pk >= 70:
                 pills.append(('amber', _pill('amber',
-                    f'<b>High disk utilisation</b> ({sid}): peak {pk:.0f}% util.', ev)))
-            break
+                    f'<b>High disk utilisation</b> (perfmon){scope_note}: peak {pk:.0f}% Disk Time.', ev)))
 
     if not pills:
         return None
@@ -454,6 +629,8 @@ def _analyse_filesystem_combined(texts: dict) -> tuple[str, str] | None:
     if not df_text and not mount_text:
         return None
 
+    cpf_dirs = _parse_cpf_database_dirs(texts.get('CPFfile', ''))
+
     df_rows: dict[str, dict] = {}
     if df_text:
         for ln in df_text.splitlines():
@@ -502,6 +679,9 @@ def _analyse_filesystem_combined(texts: dict) -> tuple[str, str] | None:
 
     _IRIS_PATHS = ('iris', 'hs-', '/db', '/jrn', '/sys', '/mgr')
 
+    def _is_iris_mp(mp: str) -> bool:
+        return (cpf_dirs and _is_cpf_iris_mountpoint(mp, cpf_dirs)) or any(p in mp.lower() for p in _IRIS_PATHS)
+
     def _fmt_mb(mb: int) -> str:
         if mb >= 1024 * 1024:
             return f'{mb/(1024*1024):.1f} TB'
@@ -530,7 +710,7 @@ def _analyse_filesystem_combined(texts: dict) -> tuple[str, str] | None:
         bg = '#f8f9fc' if i % 2 == 0 else 'white'
         df  = df_rows.get(mp)
         mnt = mount_rows.get(mp)
-        iris = any(p in mp.lower() for p in _IRIS_PATHS)
+        iris = _is_iris_mp(mp)
         mp_label = f'<b>{mp}</b>' if iris else mp
 
         size_  = _fmt_mb(df['total']) if df else '—'
@@ -566,7 +746,7 @@ def _analyse_filesystem_combined(texts: dict) -> tuple[str, str] | None:
     has_red   = any(df_rows.get(mp, {}).get('pct', 0) >= 90 for mp in all_mps)
     has_amber = any(df_rows.get(mp, {}).get('pct', 0) >= 75 for mp in all_mps)
     has_soft_iris = any(
-        mount_rows.get(mp, {}).get('soft') and any(p in mp.lower() for p in _IRIS_PATHS)
+        mount_rows.get(mp, {}).get('soft') and _is_iris_mp(mp)
         for mp in all_mps
     )
     level = 'red' if has_red else 'amber' if (has_amber or has_soft_iris) else 'green'

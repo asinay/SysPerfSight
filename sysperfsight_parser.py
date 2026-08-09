@@ -13,6 +13,26 @@ SENSITIVE_SECTIONS = {
     "tasklist": "Lists all running processes on the machine.",
 }
 
+# Older Caché SystemPerformance reports use different section ids/titles for
+# functionally identical sections. Mapping them to the canonical IRIS id/title here
+# means every downstream id- or title-keyed lookup (SENSITIVE_SECTIONS, SECTION_DESCRIPTIONS,
+# SECTION_ANALYZERS, SECTION_GROUPS, COLLAPSED_BY_DEFAULT, TITLE_TIME_FILTERS) needs only
+# one entry, shared by both products. Keyed by the raw id lowercased; IRIS's own ids
+# lowercase to strings not present here, so this is a no-op on IRIS reports.
+CACHE_SECTION_ALIASES: dict[str, tuple[str, str]] = {
+    "ccontrolall": ("IRISALL", "IRIS ALL"),
+    "license":     ("License", "License"),
+    "cpffile":     ("CPFfile", "CPF file"),
+    "cstat-c1":    ("irisstat-c1", "irisstat -c1"),
+    "cstat-d":     ("irisstat-D", "irisstat -D"),
+    "cstat-r":     ("irisstat-R", "irisstat -R"),
+}
+
+
+def _canonicalize(section_id: str, title: str) -> tuple[str, str]:
+    return CACHE_SECTION_ALIASES.get(section_id.lower(), (section_id, title))
+
+
 SECTION_DESCRIPTIONS: dict[str, str] = {
     # Common sections
     "IRIS ALL":      "Lists all IRIS instances on this machine with their ports and installation paths.",
@@ -113,6 +133,7 @@ def parse_sections(html: str) -> tuple[str, list[Section]]:
         if section_id in anchor_ids:
             continue
         title = m.group(3).strip()
+        section_id, title = _canonicalize(section_id, title)
         # grab pre content
         pre_match = re.search(r'<pre>(.*?)</pre>', m.group(0), re.DOTALL)
         content = m.group(0)
@@ -128,6 +149,7 @@ def parse_sections(html: str) -> tuple[str, list[Section]]:
     for i, m in enumerate(matches):
         section_id = m.group(1)
         title = m.group(2).strip()
+        section_id, title = _canonicalize(section_id, title)
 
         # Content runs from this match to the next match (or end)
         start = m.start()

@@ -2,7 +2,8 @@
 Analyzer for the '%SS' (IRIS System Status) section in SystemPerformance files.
 
 Format notes (learned from real data):
-- Each snapshot starts with 'InterSystems IRIS System Status: <time>'
+- Each snapshot starts with '<product> System Status: <time>' — product prefix varies
+  ('InterSystems IRIS' on IRIS, 'Cache' on older Caché); only the 'System Status:' suffix is matched
 - Column header: ' Process  Device      Namespace      Routine         CPU,Glob  Pr User/Location'
 - Fixed cols (0-based): pid=0-9, device=10-21, ns=22-36, routine=37-52, cpu_glob=53-62, pr=63-65, user=66+
 - CPU and Glob are CUMULATIVE totals since process start — deltas between snapshots are the rates
@@ -18,7 +19,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 _SNAP_HDR_RE = re.compile(
-    r'InterSystems IRIS System Status:\s+([\d:]+\s*[ap]m\s+\d+\s+\w+\s+\d{4})',
+    r'System Status:\s+([\d:]+\s*[ap]m\s+\d+\s+\w+\s+\d{4})',
     re.IGNORECASE,
 )
 _COL_HDR_RE = re.compile(

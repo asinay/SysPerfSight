@@ -35,10 +35,11 @@ _ROW_RE = re.compile(
     r'^\s*(\d+)\s*-\s*(\w+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)(?:\s+(\d+)\s+(\d+))?',
     re.MULTILINE,
 )
-# Per-second stats block
+# Per-second stats block — the column header sits on the same physical line as
+# 'RESOURCE /sec STATS' (unlike the count/% blocks, which put it on the next line);
+# \s+ matches either layout since it swallows newlines too.
 _RATE_RE = re.compile(
-    r'RESOURCE /sec STATS.*?\n'
-    r'\s*seize\s+Nseize\s+Aseize\s+Bseize.*?\n'  # BusySet/Wakeups optional
+    r'RESOURCE /sec STATS\s+seize\s+Nseize\s+Aseize\s+Bseize\b.*?\n'
     r'(.*?)'
     r'(?=\n\s*\n|Total|$)',
     re.DOTALL | re.IGNORECASE,

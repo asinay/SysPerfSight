@@ -100,10 +100,10 @@ def _mgstat_insights(df: pd.DataFrame) -> str:
     # Physical reads sustained high → cache miss pressure
     if has('PhyRds'):
         avg = df['PhyRds'].mean()
-        pk  = df['PhyRds'].max()
+        pk  = df['PhyRds'].quantile(0.99)
         if avg > 500:
             flags.append(_flag('red',
-                f'<b>High physical reads</b>: avg {avg:,.0f}/s, peak {pk:,.0f}/s — '
+                f'<b>High physical reads</b>: avg {avg:,.0f}/s, p99 peak {pk:,.0f}/s — '
                 f'sustained cache misses. Consider increasing global buffers.'))
         elif avg > 100:
             flags.append(_flag('amber',
@@ -122,31 +122,31 @@ def _mgstat_insights(df: pd.DataFrame) -> str:
     # WD queue growing (write daemon backlog)
     if has('WDQsz'):
         avg = df['WDQsz'].mean()
-        pk  = df['WDQsz'].max()
+        pk  = df['WDQsz'].quantile(0.99)
         if avg > 50:
             flags.append(_flag('red',
-                f'<b>Write Daemon queue backed up</b>: avg {avg:.0f}, peak {pk:.0f} — '
+                f'<b>Write Daemon queue backed up</b>: avg {avg:.0f}, p99 peak {pk:.0f} — '
                 f'writes are outpacing the WD cycle. Check disk write throughput.'))
         elif avg > 10:
             flags.append(_flag('amber',
-                f'<b>Write Daemon queue elevated</b>: avg {avg:.0f}, peak {pk:.0f}.'))
+                f'<b>Write Daemon queue elevated</b>: avg {avg:.0f}, p99 peak {pk:.0f}.'))
 
     # Journal writes high
     if has('Jrnwrts'):
         avg = df['Jrnwrts'].mean()
-        pk  = df['Jrnwrts'].max()
+        pk  = df['Jrnwrts'].quantile(0.99)
         if avg > 1000:
             flags.append(_flag('amber',
-                f'<b>High journal write rate</b>: avg {avg:,.0f}/s, peak {pk:,.0f}/s — '
+                f'<b>High journal write rate</b>: avg {avg:,.0f}/s, p99 peak {pk:,.0f}/s — '
                 f'heavy transactional workload. Ensure journal disk I/O is not a bottleneck.'))
 
     # Global resource NSeizes (expensive OS context switches)
     if has('pGblNsz'):
         avg_nsz = df['pGblNsz'].mean()
-        pk_nsz  = df['pGblNsz'].max()
+        pk_nsz  = df['pGblNsz'].quantile(0.99)
         if avg_nsz > 5:
             flags.append(_flag('red',
-                f'<b>High global NSeize rate</b>: avg {avg_nsz:.1f}%, peak {pk_nsz:.1f}% — '
+                f'<b>High global NSeize rate</b>: avg {avg_nsz:.1f}%, p99 peak {pk_nsz:.1f}% — '
                 f'processes are hibernating waiting for the global resource. NSeizes incur kernel '
                 f'context-switch overhead. Correlate with high Glorefs and CPU %system.'))
         elif avg_nsz > 1:

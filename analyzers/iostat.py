@@ -118,32 +118,32 @@ async def analyze(section_text: str) -> str:
     # CPU %iowait
     if cpu_df is not None and '%iowait' in cpu_metrics:
         iowait_avg = cpu_df[cpu_df['metric'] == '%iowait']['value'].mean()
-        iowait_max = cpu_df[cpu_df['metric'] == '%iowait']['value'].max()
+        iowait_p99 = cpu_df[cpu_df['metric'] == '%iowait']['value'].quantile(0.99)
         if iowait_avg > 20:
             flags.append(_flag('red',
-                f'<b>High CPU %iowait</b>: avg {iowait_avg:.1f}%, peak {iowait_max:.1f}% — '
+                f'<b>High CPU %iowait</b>: avg {iowait_avg:.1f}%, p99 peak {iowait_p99:.1f}% — '
                 f'CPU is frequently blocked waiting for I/O. Investigate disk latency or throughput saturation.'))
         elif iowait_avg > 10:
             flags.append(_flag('amber',
-                f'<b>Elevated CPU %iowait</b>: avg {iowait_avg:.1f}%, peak {iowait_max:.1f}% — '
+                f'<b>Elevated CPU %iowait</b>: avg {iowait_avg:.1f}%, p99 peak {iowait_p99:.1f}% — '
                 f'I/O is delaying the CPU. Worth correlating with disk %util and latency.'))
 
     # Per-device %util
     if dev_df is not None and '%util' in dev_metrics:
         util_avg = (dev_df[dev_df['metric'] == '%util']
                     .groupby('device')['value'].mean())
-        util_max = (dev_df[dev_df['metric'] == '%util']
-                    .groupby('device')['value'].max())
+        util_p99 = (dev_df[dev_df['metric'] == '%util']
+                    .groupby('device')['value'].quantile(0.99))
         for dev in chart_devs:
             avg_v = util_avg.get(dev, 0)
-            max_v = util_max.get(dev, 0)
+            max_v = util_p99.get(dev, 0)
             if avg_v > 60:
                 flags.append(_flag('red',
-                    f'<b>{dev} %util avg {avg_v:.1f}%</b> (peak {max_v:.1f}%) — '
+                    f'<b>{dev} %util avg {avg_v:.1f}%</b> (p99 peak {max_v:.1f}%) — '
                     f'device is heavily utilised. Concurrent I/O may queue behind it.'))
             elif avg_v > 30:
                 flags.append(_flag('amber',
-                    f'<b>{dev} %util avg {avg_v:.1f}%</b> (peak {max_v:.1f}%) — '
+                    f'<b>{dev} %util avg {avg_v:.1f}%</b> (p99 peak {max_v:.1f}%) — '
                     f'moderate utilisation. Monitor under heavier workload.'))
 
     # Per-device latency
@@ -189,8 +189,13 @@ async def analyze(section_text: str) -> str:
     has_iowait  = '%iowait' in cpu_metrics
 
     row_defs = []  # (title, fn(fig, row))
+    ref_lines: dict[int, list[tuple]] = {}  # row_idx -> [(y, color, label)]
 
     if has_util:
+        ref_lines[len(row_defs) + 1] = [
+            (60, '#dc2626', 'heavily utilised (60%)'),
+            (30, '#d97706', 'moderate (30%)'),
+        ]
         def _add_util(fig, r, devs=chart_devs):
             for ci, dev in enumerate(devs):
                 d = dev_df[(dev_df['device'] == dev) & (dev_df['metric'] == '%util')].sort_values('dt')
@@ -207,6 +212,10 @@ async def analyze(section_text: str) -> str:
         row_defs.append(('Disk %util', _add_util))
 
     if has_iowait and cpu_df is not None:
+        ref_lines[len(row_defs) + 1] = [
+            (20, '#dc2626', 'high iowait (20%)'),
+            (10, '#d97706', 'elevated iowait (10%)'),
+        ]
         def _add_cpu(fig, r, cpu_df=cpu_df):
             for mi, (metric, color) in enumerate(
                     [('%iowait', '#e74c3c'), ('%user', '#0055aa'), ('%system', '#e67e22')]):
@@ -263,6 +272,7 @@ async def analyze(section_text: str) -> str:
         row_defs.append(('Throughput kB/s (read solid, write dotted)', _add_thru))
 
     if has_await:
+        ref_lines[len(row_defs) + 1] = [(1, '#64748b', '1 ms reference (SSD/NVMe target)')]
         def _add_await(fig, r):
             for ci, dev in enumerate(chart_devs):
                 for metric, dash in [('r_await', None), ('w_await', 'dot'), ('await', None)]:
@@ -293,6 +303,15 @@ async def analyze(section_text: str) -> str:
     )
     for row_idx, (_, fn) in enumerate(row_defs, start=1):
         fn(fig, row_idx)
+
+    for row_idx, lines in ref_lines.items():
+        for y, color, label in lines:
+            fig.add_hline(
+                y=y, row=row_idx, col=1,
+                line=dict(color=color, width=1, dash='dash'),
+                annotation_text=label, annotation_position='top left',
+                annotation_font=dict(size=9, color=color), opacity=0.7,
+            )
 
     fig.update_layout(
         height=250 * nrows,

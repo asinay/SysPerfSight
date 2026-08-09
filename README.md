@@ -1,6 +1,18 @@
 # SysPerfSight
 
-A web tool for analyzing InterSystems IRIS SystemPerformance HTML reports. Upload a report, choose which sections to keep, and download a clean analyzed copy — with inline charts, insights, and cross-section synthesis — without sharing data you didn't intend to.
+A web tool for analyzing InterSystems IRIS SystemPerformance HTML reports (and older Caché pButtons reports — Windows and Linux). Upload a report, choose which sections to keep, and download a clean analyzed copy — with inline charts, insights, and cross-section synthesis — without sharing data you didn't intend to.
+
+Pick your sections, and sensitive ones are flagged automatically:
+
+![Section selection with sensitive-data warnings](docs/screenshots/section-select.png)
+
+Selected sections get charts injected above the raw data:
+
+![mgstat chart grid](docs/screenshots/mgstat-charts.png)
+
+...and plain-language insights that call out what's worth a second look:
+
+![Insight flags](docs/screenshots/mgstat-insights.png)
 
 ## Features
 
@@ -11,6 +23,8 @@ A web tool for analyzing InterSystems IRIS SystemPerformance HTML reports. Uploa
 - One-click "Select non-sensitive only" filter
 - Excluded sections keep their header and nav anchor — replaced with a clearly marked placeholder so the file remains well-formed and shareable
 - Optional time range filter to slice time-series sections (mgstat, vmstat, sar, iostat)
+- Time-series charts carry dashed threshold reference lines (e.g. 70%/40% disk %util, 1 ms latency, 80% CPU busy) matching each chart's own insight thresholds, so the "is this bad?" line is visible at a glance
+- When a CPF file is included, disk-saturation insights cross-reference its declared database/journal/WIJ paths against the actual disk layout (Linux `mount`, Windows drive letters) and scope warnings to the disks that actually matter to IRIS — a spike on an unrelated OS disk won't trigger a false alarm
 - **Three export modes** for different sharing needs:
   - **Full report** — charts, insights, raw data, cross-section synthesis, and sensitive-data banners
   - **Charts + Raw** — charts plus raw data (collapsed); no insights or synthesis
@@ -84,10 +98,10 @@ Selected sections with an analyzer get inline charts and insights injected above
 |---|---|
 | mgstat | Global refs, physical I/O, journal writes, WD phase, routine cache, network charts; stat cards; NSeize/ASeize contention and WD saturation insights |
 | %SS | Process type breakdown, TCP trend, top-CPU/Glob tables, namespace and top-routine breakdowns; insights |
-| vmstat | Run queue, swap I/O, CPU breakdown, block I/O charts; stat cards; insights |
-| sar -u | Stacked CPU area chart (user/sys/iowait/steal + idle); stat cards; saturation/steal/iowait insights |
-| sar -d | %util, tps, throughput, r/w latency, queue depth charts; per-device summary table; insights |
-| iostat | %util, CPU iowait, IOPS, throughput, latency charts; insights |
+| vmstat | Run queue, swap I/O, CPU breakdown, block I/O charts; stat cards; insights; reference lines for run-queue and CPU-busy thresholds |
+| sar -u | Stacked CPU area chart (user/sys/iowait/steal + idle); stat cards; saturation/steal/iowait insights; reference lines for %CPU-used thresholds |
+| sar -d | %util, tps, throughput, r/w latency, queue depth charts; per-device summary table; insights; reference lines for %util and latency thresholds |
+| iostat | %util, CPU iowait, IOPS, throughput, latency charts; insights; reference lines for %util, iowait, and latency thresholds |
 | free | RAM usage, adjusted free RAM trend, swap used charts; stat cards; memory pressure insights |
 | irisstat -D | Lock contention summary and per-second rates tables (sortable); block collision insights |
 | irisstat -R | Routine buffer pool: in-use routines, top packages by buffer count, type breakdown; class LRU eviction insights |
@@ -98,7 +112,7 @@ Selected sections with an analyzer get inline charts and insights injected above
 | cpu | CPU topology summary cards |
 | Windows info | OS/hardware summary cards |
 | tasklist | Top processes by memory |
-| perfmon | CPU utilization, processor queue, available memory, paging, disk IOPS/throughput/latency, network throughput charts; insights |
+| perfmon | CPU utilization, processor queue, available memory, paging, network throughput charts; disk %busy/queue/IOPS/throughput/latency charts broken out **per physical drive**; insights and reference lines to match |
 | CPF file | Database configuration, namespace mappings, and key parameter summary |
 
 ## Project structure

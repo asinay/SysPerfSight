@@ -42,50 +42,73 @@ _COUNTER_MAP = [
 ]
 
 
-def _match_counter(path: str) -> str | None:
-    """Map a PDH counter path to a logical column name."""
+def _match_counter(path: str) -> tuple[str, str] | None:
+    """Map a PDH counter path to (logical_name, instance).
+
+    instance is '' for system-wide counters (CPU, memory, processor queue,
+    network) and the raw PDH instance string (e.g. '1 d:') for physicaldisk
+    counters, so each physical disk keeps its own series instead of being
+    collapsed into one.
+    """
     # Path: \\HOSTNAME\Object(Instance)\Counter  or  \\HOSTNAME\Object\Counter
     parts = [p for p in path.split('\\') if p]
     if len(parts) < 2:
         return None
-    obj_inst = parts[-2].lower()   # e.g. "processor(_total)"
+    obj_part = parts[-2]
     counter  = parts[-1].lower()   # e.g. "% processor time"
+    m = re.match(r'([^(]+)(?:\((.*)\))?', obj_part)
+    if not m:
+        return None
+    obj_lower = m.group(1).strip().lower()
+    instance  = (m.group(2) or '').strip()
     for obj_sub, ctr_sub, logical in _COUNTER_MAP:
-        if obj_sub in obj_inst and ctr_sub in counter:
-            return logical
+        if obj_sub in obj_lower and ctr_sub in counter:
+            return logical, (instance if logical.startswith('disk_') else '')
     return None
 
 
-def _parse_perfmon(text: str) -> pd.DataFrame | None:
+def _parse_perfmon(text: str) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """Returns (flat_df, disk_df).
+
+    flat_df: one row per timestamp, one column per system-wide counter
+             (cpu_*, mem_*, proc_queue, net_*).
+    disk_df: long format — columns dt/instance/metric/value — one row per
+             (timestamp, physical disk, counter), so per-drive breakdowns
+             and IRIS-drive cross-referencing stay possible.
+    """
     lines = text.splitlines()
     header_idx = next((i for i, ln in enumerate(lines) if _PDH_RE.search(ln)), None)
     if header_idx is None:
-        return None
+        return None, None
 
     try:
         reader = csv.reader(io.StringIO('\n'.join(lines[header_idx:])))
         headers = next(reader)
     except Exception:
-        return None
+        return None, None
 
     if not headers:
-        return None
+        return None, None
 
-    # Build idx_to_logical: prefer _Total over named instances
-    assigned: dict[str, int] = {}   # logical → csv_col_index
+    flat_assigned: dict[str, int] = {}          # logical -> csv_col_index (prefer _Total)
+    disk_cols: list[tuple[int, str, str]] = []  # (csv_col_index, logical, instance)
     for i, h in enumerate(headers[1:], start=1):
-        logical = _match_counter(h)
-        if logical is None:
+        matched = _match_counter(h)
+        if matched is None:
             continue
-        is_total = '_total' in h.lower()
-        if logical not in assigned or is_total:
-            assigned[logical] = i
+        logical, instance = matched
+        if instance:
+            disk_cols.append((i, logical, instance))
+        else:
+            is_total = '_total' in h.lower()
+            if logical not in flat_assigned or is_total:
+                flat_assigned[logical] = i
 
-    idx_to_logical = {v: k for k, v in assigned.items()}  # csv_col_index → logical
-    if not idx_to_logical:
-        return None
+    idx_to_flat = {v: k for k, v in flat_assigned.items()}
+    if not idx_to_flat and not disk_cols:
+        return None, None
 
-    records = []
+    flat_records, disk_records = [], []
     for row in reader:
         if not row or not row[0].strip():
             continue
@@ -100,24 +123,36 @@ def _parse_perfmon(text: str) -> pd.DataFrame | None:
             continue
 
         rec: dict = {'dt': ts}
-        for col_idx, logical in idx_to_logical.items():
+        for col_idx, logical in idx_to_flat.items():
             if col_idx < len(row):
                 try:
                     rec[logical] = float(row[col_idx].strip())
                 except (ValueError, AttributeError):
                     pass
-        records.append(rec)
+        flat_records.append(rec)
 
-    if len(records) < 2:
-        return None
+        for col_idx, logical, instance in disk_cols:
+            if col_idx >= len(row):
+                continue
+            try:
+                v = float(row[col_idx].strip())
+            except (ValueError, AttributeError):
+                continue
+            disk_records.append({'dt': ts, 'instance': instance, 'metric': logical, 'value': v})
 
-    df = pd.DataFrame(records).sort_values('dt').reset_index(drop=True)
+    flat_df = None
+    if len(flat_records) >= 2:
+        flat_df = pd.DataFrame(flat_records).sort_values('dt').reset_index(drop=True)
+        if len(flat_df) > 1000:
+            step = len(flat_df) // 1000
+            flat_df = flat_df.iloc[::step].reset_index(drop=True)
 
-    if len(df) > 1000:
-        step = len(df) // 1000
-        df = df.iloc[::step].reset_index(drop=True)
+    disk_df = pd.DataFrame(disk_records) if disk_records else None
+    if disk_df is not None and disk_df['dt'].nunique() > 1000:
+        keep_ts = sorted(disk_df['dt'].unique())[::len(disk_df['dt'].unique()) // 1000]
+        disk_df = disk_df[disk_df['dt'].isin(keep_ts)].reset_index(drop=True)
 
-    return df
+    return flat_df, disk_df
 
 
 def _flag(level: str, text: str) -> str:
@@ -146,38 +181,43 @@ def _stat(label: str, value: str, unit: str = '') -> str:
 
 
 async def analyze(section_text: str) -> str:
-    df = _parse_perfmon(section_text)
-    if df is None or df.empty:
+    df, disk_df = _parse_perfmon(section_text)
+    if (df is None or df.empty) and (disk_df is None or disk_df.empty):
         return ''
 
-    n     = len(df)
-    dcols = set(df.columns)
+    n     = len(df) if df is not None else disk_df['dt'].nunique()
+    dcols = set(df.columns) if df is not None else set()
     has   = lambda c: c in dcols  # noqa: E731
+
+    disk_instances = sorted(disk_df['instance'].unique()) if disk_df is not None else []
+    phys_disks  = [d for d in disk_instances if d.lower() != '_total']
+    chart_disks = phys_disks if phys_disks else disk_instances
+    disk_metrics = set(disk_df['metric'].unique()) if disk_df is not None else set()
 
     # ── Insights ─────────────────────────────────────────────────────────────
     flags = []
 
     if has('cpu_total'):
         avg = df['cpu_total'].mean()
-        pk  = df['cpu_total'].max()
+        pk  = df['cpu_total'].quantile(0.99)
         if avg > 80:
             flags.append(_flag('red',
-                f'<b>CPU saturation</b>: avg {avg:.1f}%, peak {pk:.1f}% — '
+                f'<b>CPU saturation</b>: avg {avg:.1f}%, p99 peak {pk:.1f}% — '
                 f'processor is a bottleneck. Check Process\\% Processor Time for top consumers.'))
         elif avg > 60:
             flags.append(_flag('amber',
-                f'<b>Elevated CPU utilization</b>: avg {avg:.1f}%, peak {pk:.1f}%.'))
+                f'<b>Elevated CPU utilization</b>: avg {avg:.1f}%, p99 peak {pk:.1f}%.'))
 
     if has('proc_queue'):
         avg = df['proc_queue'].mean()
-        pk  = df['proc_queue'].max()
+        pk  = df['proc_queue'].quantile(0.99)
         if avg > 4:
             flags.append(_flag('red',
-                f'<b>Processor queue backed up</b>: avg {avg:.1f}, peak {pk:.0f} — '
+                f'<b>Processor queue backed up</b>: avg {avg:.1f}, p99 peak {pk:.0f} — '
                 f'threads are waiting for CPU. Indicates CPU saturation.'))
         elif avg > 2:
             flags.append(_flag('amber',
-                f'<b>Processor queue elevated</b>: avg {avg:.1f}, peak {pk:.0f}.'))
+                f'<b>Processor queue elevated</b>: avg {avg:.1f}, p99 peak {pk:.0f}.'))
 
     if has('mem_avail'):
         min_avail = df['mem_avail'].min()
@@ -192,46 +232,62 @@ async def analyze(section_text: str) -> str:
 
     if has('mem_pages'):
         avg = df['mem_pages'].mean()
-        pk  = df['mem_pages'].max()
+        pk  = df['mem_pages'].quantile(0.99)
         if avg > 100:
             flags.append(_flag('red',
-                f'<b>High page fault rate</b>: avg {avg:.0f} pages/sec, peak {pk:.0f} — '
+                f'<b>High page fault rate</b>: avg {avg:.0f} pages/sec, p99 peak {pk:.0f} — '
                 f'system is paging heavily. Memory pressure confirmed.'))
         elif avg > 20:
             flags.append(_flag('amber',
                 f'<b>Elevated paging</b>: avg {avg:.0f} pages/sec.'))
 
-    if has('disk_queue'):
-        avg = df['disk_queue'].mean()
-        pk  = df['disk_queue'].max()
-        if avg > 2:
-            flags.append(_flag('red',
-                f'<b>Disk queue saturation</b>: avg {avg:.1f}, peak {pk:.1f} — '
-                f'I/O is queuing up. Storage cannot keep pace with demand.'))
-        elif avg > 1:
-            flags.append(_flag('amber',
-                f'<b>Disk queue elevated</b>: avg {avg:.1f}, peak {pk:.1f}.'))
+    def _disk_series(metric: str, dev: str) -> pd.Series:
+        return disk_df[(disk_df['instance'] == dev) & (disk_df['metric'] == metric)]['value']
 
-    if has('disk_rlatency'):
-        avg_ms = df['disk_rlatency'].mean() * 1000
-        pk_ms  = df['disk_rlatency'].max()  * 1000
-        if avg_ms > 20:
-            flags.append(_flag('red',
-                f'<b>High disk read latency</b>: avg {avg_ms:.1f} ms, peak {pk_ms:.1f} ms — '
-                f'storage response is very slow for random reads.'))
-        elif avg_ms > 10:
-            flags.append(_flag('amber',
-                f'<b>Elevated disk read latency</b>: avg {avg_ms:.1f} ms, peak {pk_ms:.1f} ms.'))
+    if 'disk_busy' in disk_metrics:
+        for dev in chart_disks:
+            s = _disk_series('disk_busy', dev)
+            if s.empty:
+                continue
+            avg, pk = s.mean(), s.quantile(0.99)
+            if avg > 60:
+                flags.append(_flag('red',
+                    f'<b>{dev} %Disk Time avg {avg:.1f}%</b> (p99 peak {pk:.1f}%) — '
+                    f'drive is heavily utilised. Concurrent I/O may queue behind it.'))
+            elif avg > 30:
+                flags.append(_flag('amber',
+                    f'<b>{dev} %Disk Time avg {avg:.1f}%</b> (p99 peak {pk:.1f}%) — '
+                    f'moderate utilisation. Monitor under heavier workload.'))
 
-    if has('disk_wlatency'):
-        avg_ms = df['disk_wlatency'].mean() * 1000
-        pk_ms  = df['disk_wlatency'].max()  * 1000
-        if avg_ms > 20:
-            flags.append(_flag('red',
-                f'<b>High disk write latency</b>: avg {avg_ms:.1f} ms, peak {pk_ms:.1f} ms.'))
-        elif avg_ms > 10:
-            flags.append(_flag('amber',
-                f'<b>Elevated disk write latency</b>: avg {avg_ms:.1f} ms, peak {pk_ms:.1f} ms.'))
+    if 'disk_queue' in disk_metrics:
+        for dev in chart_disks:
+            s = _disk_series('disk_queue', dev)
+            if s.empty:
+                continue
+            avg, pk = s.mean(), s.quantile(0.99)
+            if avg > 2:
+                flags.append(_flag('red',
+                    f'<b>{dev} queue saturation</b>: avg {avg:.1f}, p99 peak {pk:.1f} — '
+                    f'I/O is queuing up. Storage cannot keep pace with demand.'))
+            elif avg > 1:
+                flags.append(_flag('amber',
+                    f'<b>{dev} queue elevated</b>: avg {avg:.1f}, p99 peak {pk:.1f}.'))
+
+    for metric, label in [('disk_rlatency', 'read latency'), ('disk_wlatency', 'write latency')]:
+        if metric not in disk_metrics:
+            continue
+        for dev in chart_disks:
+            s = _disk_series(metric, dev) * 1000
+            if s.empty:
+                continue
+            avg_ms, pk_ms = s.mean(), s.quantile(0.99)
+            if avg_ms > 20:
+                flags.append(_flag('red',
+                    f'<b>{dev} {label} avg {avg_ms:.1f} ms</b> (p99 peak {pk_ms:.1f} ms) — '
+                    f'storage response is very slow.'))
+            elif avg_ms > 10:
+                flags.append(_flag('amber',
+                    f'<b>{dev} {label} avg {avg_ms:.1f} ms</b> (p99 peak {pk_ms:.1f} ms).'))
 
     if not flags:
         flags.append(_flag('green', 'No significant CPU, memory, or disk pressure detected.'))
@@ -254,12 +310,12 @@ async def analyze(section_text: str) -> str:
         stat_items.append(_stat('Avail RAM min', f'{df["mem_avail"].min():.0f}', 'MB'))
     if has('mem_commit_pct'):
         stat_items.append(_stat('Mem commit avg', f'{df["mem_commit_pct"].mean():.1f}', '%'))
-    if has('disk_queue'):
-        stat_items.append(_stat('Disk queue avg', f'{df["disk_queue"].mean():.2f}'))
-    if has('disk_rlatency'):
-        stat_items.append(_stat('Read latency avg', f'{df["disk_rlatency"].mean()*1000:.1f}', 'ms'))
-    if has('disk_wlatency'):
-        stat_items.append(_stat('Write latency avg', f'{df["disk_wlatency"].mean()*1000:.1f}', 'ms'))
+    if 'disk_queue' in disk_metrics:
+        stat_items.append(_stat('Disk queue avg (all drives)', f'{disk_df[disk_df["metric"]=="disk_queue"]["value"].mean():.2f}'))
+    if 'disk_rlatency' in disk_metrics:
+        stat_items.append(_stat('Read latency avg (all drives)', f'{disk_df[disk_df["metric"]=="disk_rlatency"]["value"].mean()*1000:.1f}', 'ms'))
+    if 'disk_wlatency' in disk_metrics:
+        stat_items.append(_stat('Write latency avg (all drives)', f'{disk_df[disk_df["metric"]=="disk_wlatency"]["value"].mean()*1000:.1f}', 'ms'))
 
     stats_html = (
         '<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:14px">'
@@ -267,8 +323,45 @@ async def analyze(section_text: str) -> str:
     ) if stat_items else ''
 
     # ── Charts ────────────────────────────────────────────────────────────────
-    # Each entry: (title, y_label, [(col, color, name, transform_fn)])
-    row_defs = []
+    row_defs = []  # (title, fn(fig, row))
+    ref_lines: dict[int, list[tuple]] = {}  # row_idx -> [(y, color, label)]
+    COLORS = ['#0055aa', '#e74c3c', '#27ae60', '#e67e22', '#8e44ad',
+              '#16a085', '#f39c12', '#2c3e50', '#c0392b', '#2980b9']
+
+    def _flat_row(traces, ylabel):
+        def fn(fig, row):
+            for col, color, name, transform in traces:
+                y = df[col].apply(transform) if transform else df[col]
+                fig.add_trace(go.Scatter(
+                    x=df['dt'], y=y, name=name, mode='lines',
+                    line=dict(color=color, width=1.5),
+                    hovertemplate=f'<b>{name}</b><br>%{{x}}<br>%{{y:.2f}}<extra></extra>',
+                ), row=row, col=1)
+            if ylabel:
+                fig.update_yaxes(title_text=ylabel, row=row, col=1)
+            fig.update_yaxes(showgrid=True, gridcolor='#e8edf5', rangemode='tozero', row=row, col=1)
+        return fn
+
+    def _disk_row(metric_specs, ylabel):
+        """metric_specs: list of (metric, dash_or_None, label_suffix, transform_fn)."""
+        def fn(fig, row):
+            for ci, dev in enumerate(chart_disks):
+                for metric, dash, suffix, transform in metric_specs:
+                    d = disk_df[(disk_df['instance'] == dev) & (disk_df['metric'] == metric)].sort_values('dt')
+                    if d.empty:
+                        continue
+                    y = d['value'].apply(transform) if transform else d['value']
+                    fig.add_trace(go.Scatter(
+                        x=d['dt'], y=y, name=f'{dev} {suffix}', mode='lines',
+                        line=dict(color=COLORS[ci % len(COLORS)], width=1.2,
+                                  **(dict(dash=dash) if dash else {})),
+                        legendgroup=f'{dev}_{metric}', showlegend=True,
+                        hovertemplate=f'<b>{dev} {suffix}</b><br>%{{x}}<br>%{{y:.2f}}<extra></extra>',
+                    ), row=row, col=1)
+            if ylabel:
+                fig.update_yaxes(title_text=ylabel, row=row, col=1)
+            fig.update_yaxes(showgrid=True, gridcolor='#e8edf5', rangemode='tozero', row=row, col=1)
+        return fn
 
     # CPU: single % Processor Time or stacked user+kernel if available
     cpu_traces = []
@@ -281,60 +374,60 @@ async def analyze(section_text: str) -> str:
     if has('cpu_interrupt'):
         cpu_traces.append(('cpu_interrupt', '#e74c3c', '% Interrupt Time', None))
     if cpu_traces:
-        row_defs.append(('CPU Utilization (%)', '%', cpu_traces))
+        if has('cpu_total'):
+            ref_lines[len(row_defs) + 1] = [(80, '#d97706', '80% busy')]
+        row_defs.append(('CPU Utilization (%)', _flat_row(cpu_traces, '%')))
 
     if has('proc_queue'):
-        row_defs.append(('Processor Queue Length', 'threads', [
-            ('proc_queue', '#e74c3c', 'Processor Queue Length', None),
-        ]))
+        ref_lines[len(row_defs) + 1] = [
+            (4, '#dc2626', 'queue backed up (4)'),
+            (2, '#d97706', 'elevated queue (2)'),
+        ]
+        row_defs.append(('Processor Queue Length', _flat_row(
+            [('proc_queue', '#e74c3c', 'Processor Queue Length', None)], 'threads')))
 
     # Memory
     mem_traces = []
     if has('mem_avail'):
         mem_traces.append(('mem_avail', '#27ae60', 'Available MBytes', None))
     if mem_traces:
-        row_defs.append(('Memory — Available MBytes', 'MB', mem_traces))
+        row_defs.append(('Memory — Available MBytes', _flat_row(mem_traces, 'MB')))
 
     if has('mem_pages'):
-        row_defs.append(('Paging Activity (pages/sec)', 'pages/sec', [
-            ('mem_pages', '#e74c3c', 'Pages/sec', None),
-        ]))
+        row_defs.append(('Paging Activity (pages/sec)', _flat_row(
+            [('mem_pages', '#e74c3c', 'Pages/sec', None)], 'pages/sec')))
 
-    # Disk % busy and queue
-    disk_busy_traces = []
-    if has('disk_busy'):
-        disk_busy_traces.append(('disk_busy', '#e74c3c', '% Disk Time', None))
-    if has('disk_queue'):
-        disk_busy_traces.append(('disk_queue', '#8e44ad', 'Avg Queue Length', None))
-    if disk_busy_traces:
-        row_defs.append(('Disk — % Busy & Queue Length', '', disk_busy_traces))
+    # Disk rows — one trace per physical drive per metric, not collapsed
+    if disk_df is not None:
+        if 'disk_busy' in disk_metrics or 'disk_queue' in disk_metrics:
+            specs = [m for m in [
+                ('disk_busy', None, '%busy', None),
+                ('disk_queue', 'dot', 'queue', None),
+            ] if m[0] in disk_metrics]
+            ref_lines[len(row_defs) + 1] = [(2, '#dc2626', 'queue saturated (2)')]
+            row_defs.append(('Disk — % Busy & Queue Length (per drive)', _disk_row(specs, '')))
 
-    # Disk IOPS
-    iops_traces = []
-    if has('disk_rps'):
-        iops_traces.append(('disk_rps', '#0055aa', 'Reads/sec', None))
-    if has('disk_wps'):
-        iops_traces.append(('disk_wps', '#e74c3c', 'Writes/sec', None))
-    if iops_traces:
-        row_defs.append(('Disk IOPS', 'ops/sec', iops_traces))
+        if 'disk_rps' in disk_metrics or 'disk_wps' in disk_metrics:
+            specs = [m for m in [
+                ('disk_rps', None, 'reads/s', None),
+                ('disk_wps', 'dot', 'writes/s', None),
+            ] if m[0] in disk_metrics]
+            row_defs.append(('Disk IOPS (per drive)', _disk_row(specs, 'ops/sec')))
 
-    # Disk throughput (bytes → MB/s)
-    tput_traces = []
-    if has('disk_rbytes'):
-        tput_traces.append(('disk_rbytes', '#0055aa', 'Read MB/s', lambda v: v / 1048576))
-    if has('disk_wbytes'):
-        tput_traces.append(('disk_wbytes', '#e74c3c', 'Write MB/s', lambda v: v / 1048576))
-    if tput_traces:
-        row_defs.append(('Disk Throughput (MB/s)', 'MB/s', tput_traces))
+        if 'disk_rbytes' in disk_metrics or 'disk_wbytes' in disk_metrics:
+            specs = [m for m in [
+                ('disk_rbytes', None, 'read MB/s', lambda v: v / 1048576),
+                ('disk_wbytes', 'dot', 'write MB/s', lambda v: v / 1048576),
+            ] if m[0] in disk_metrics]
+            row_defs.append(('Disk Throughput (per drive)', _disk_row(specs, 'MB/s')))
 
-    # Disk latency (seconds → ms)
-    lat_traces = []
-    if has('disk_rlatency'):
-        lat_traces.append(('disk_rlatency', '#0055aa', 'Avg Read ms', lambda v: v * 1000))
-    if has('disk_wlatency'):
-        lat_traces.append(('disk_wlatency', '#e74c3c', 'Avg Write ms', lambda v: v * 1000))
-    if lat_traces:
-        row_defs.append(('Disk Latency (ms)', 'ms', lat_traces))
+        if 'disk_rlatency' in disk_metrics or 'disk_wlatency' in disk_metrics:
+            specs = [m for m in [
+                ('disk_rlatency', None, 'read ms', lambda v: v * 1000),
+                ('disk_wlatency', 'dot', 'write ms', lambda v: v * 1000),
+            ] if m[0] in disk_metrics]
+            ref_lines[len(row_defs) + 1] = [(1, '#64748b', '1 ms reference (SSD/NVMe target)')]
+            row_defs.append(('Disk Latency (per drive)', _disk_row(specs, 'ms')))
 
     # Network
     net_traces = []
@@ -346,7 +439,7 @@ async def analyze(section_text: str) -> str:
         if has('net_recv'):
             net_traces.append(('net_recv', '#e74c3c', 'Recv Bytes/sec', None))
     if net_traces:
-        row_defs.append(('Network Throughput (bytes/sec)', 'bytes/sec', net_traces))
+        row_defs.append(('Network Throughput (bytes/sec)', _flat_row(net_traces, 'bytes/sec')))
 
     if not row_defs:
         return ''
@@ -358,18 +451,17 @@ async def analyze(section_text: str) -> str:
         vertical_spacing=0.06 if nrows > 3 else 0.10,
     )
 
-    for row_idx, (title, ylabel, traces) in enumerate(row_defs, start=1):
-        for col, color, name, transform in traces:
-            y = df[col].apply(transform) if transform else df[col]
-            fig.add_trace(go.Scatter(
-                x=df['dt'], y=y, name=name, mode='lines',
-                line=dict(color=color, width=1.5),
-                hovertemplate=f'<b>{name}</b><br>%{{x}}<br>%{{y:.2f}}<extra></extra>',
-            ), row=row_idx, col=1)
-        if ylabel:
-            fig.update_yaxes(title_text=ylabel, row=row_idx, col=1)
-        fig.update_yaxes(showgrid=True, gridcolor='#e8edf5', rangemode='tozero',
-                         row=row_idx, col=1)
+    for row_idx, (_, fn) in enumerate(row_defs, start=1):
+        fn(fig, row_idx)
+
+    for row_idx, lines in ref_lines.items():
+        for y, color, label in lines:
+            fig.add_hline(
+                y=y, row=row_idx, col=1,
+                line=dict(color=color, width=1, dash='dash'),
+                annotation_text=label, annotation_position='top left',
+                annotation_font=dict(size=9, color=color), opacity=0.7,
+            )
 
     fig.update_layout(
         height=max(280 * nrows, 400),
@@ -388,7 +480,8 @@ async def analyze(section_text: str) -> str:
                 'modeBarButtonsToRemove': ['select2d', 'lasso2d']},
     )
 
-    duration = df['dt'].iloc[-1] - df['dt'].iloc[0]
+    dt_series = df['dt'] if df is not None else disk_df['dt']
+    duration = dt_series.max() - dt_series.min()
     h, rem = divmod(int(duration.total_seconds()), 3600)
     duration_str = f'{h}h {rem // 60}m' if h else f'{rem // 60}m'
 

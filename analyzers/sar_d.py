@@ -149,17 +149,17 @@ async def analyze(section_text: str) -> str:
 
     if has_util:
         util_avg = data_df[data_df['device'].isin(chart_devs)].groupby('device')['pct_util'].mean()
-        util_max = data_df[data_df['device'].isin(chart_devs)].groupby('device')['pct_util'].max()
+        util_p99 = data_df[data_df['device'].isin(chart_devs)].groupby('device')['pct_util'].quantile(0.99)
         for dev in chart_devs:
             avg_v = util_avg.get(dev, 0)
-            max_v = util_max.get(dev, 0)
+            max_v = util_p99.get(dev, 0)
             if avg_v > 70:
                 flags.append(_flag('red',
-                    f'<b>{dev} avg %util {avg_v:.1f}%</b> (peak {max_v:.1f}%) — '
+                    f'<b>{dev} avg %util {avg_v:.1f}%</b> (p99 peak {max_v:.1f}%) — '
                     f'device is heavily saturated. I/O requests are queuing.'))
             elif avg_v > 40:
                 flags.append(_flag('amber',
-                    f'<b>{dev} avg %util {avg_v:.1f}%</b> (peak {max_v:.1f}%) — '
+                    f'<b>{dev} avg %util {avg_v:.1f}%</b> (p99 peak {max_v:.1f}%) — '
                     f'moderate utilisation. Monitor for growth under load.'))
 
     _BASELINES = 'Baselines: NVMe &lt;1 ms · SAS/SATA SSD &lt;2 ms · SAN/flash array &lt;5 ms · spinning disk &lt;10 ms.'
@@ -292,6 +292,7 @@ async def analyze(section_text: str) -> str:
               '#16a085', '#f39c12', '#2c3e50', '#c0392b', '#2980b9']
 
     row_defs = []
+    ref_lines: dict[int, list[tuple]] = {}  # row_idx -> [(y, color, label)]
 
     def _line_traces(fig, row, metric, y_label, unit='', devs=chart_devs):
         for ci, dev in enumerate(devs):
@@ -308,6 +309,10 @@ async def analyze(section_text: str) -> str:
                          rangemode='tozero', row=row, col=1)
 
     if has_util:
+        ref_lines[len(row_defs) + 1] = [
+            (70, '#dc2626', 'saturated (70%)'),
+            (40, '#d97706', 'elevated (40%)'),
+        ]
         row_defs.append(('%util per device', lambda fig, r: _line_traces(fig, r, 'pct_util', '%util', '%')))
 
     if has_tps:
@@ -350,8 +355,10 @@ async def analyze(section_text: str) -> str:
                     ), row=row, col=1)
             fig.update_yaxes(title_text='ms', showgrid=True, gridcolor='#e8edf5',
                              rangemode='tozero', row=row, col=1)
+        ref_lines[len(row_defs) + 1] = [(1, '#64748b', '1 ms reference (SSD/NVMe target)')]
         row_defs.append(('Latency ms (r_await solid, w_await dotted)', _add_rw_await))
     elif has_await:
+        ref_lines[len(row_defs) + 1] = [(1, '#64748b', '1 ms reference (SSD/NVMe target)')]
         row_defs.append(('I/O await ms', lambda fig, r: _line_traces(fig, r, 'await', 'ms', ' ms')))
 
     if has_aqu:
@@ -368,6 +375,15 @@ async def analyze(section_text: str) -> str:
     )
     for row_idx, (_, fn) in enumerate(row_defs, start=1):
         fn(fig, row_idx)
+
+    for row_idx, lines in ref_lines.items():
+        for y, color, label in lines:
+            fig.add_hline(
+                y=y, row=row_idx, col=1,
+                line=dict(color=color, width=1, dash='dash'),
+                annotation_text=label, annotation_position='top left',
+                annotation_font=dict(size=9, color=color), opacity=0.7,
+            )
 
     fig.update_layout(
         height=240 * nrows,

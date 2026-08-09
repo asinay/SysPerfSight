@@ -133,22 +133,22 @@ async def analyze(section_text: str) -> str:
 
     if has_iowait:
         wa_avg = df['%iowait'].mean()
-        wa_max = df['%iowait'].max()
+        wa_p99 = df['%iowait'].quantile(0.99)
         if wa_avg > 20:
             flags.append(_flag('red',
-                f'<b>High CPU iowait</b>: avg {wa_avg:.1f}%, peak {wa_max:.1f}% — '
+                f'<b>High CPU iowait</b>: avg {wa_avg:.1f}%, p99 peak {wa_p99:.1f}% — '
                 f'CPU is frequently blocked on I/O. Correlate with iostat/sar -d latency.'))
         elif wa_avg > 10:
             flags.append(_flag('amber',
-                f'<b>Elevated CPU iowait</b>: avg {wa_avg:.1f}%, peak {wa_max:.1f}% — '
+                f'<b>Elevated CPU iowait</b>: avg {wa_avg:.1f}%, p99 peak {wa_p99:.1f}% — '
                 f'I/O delays are consuming CPU wait cycles.'))
 
     if has_steal:
         steal_avg = df['%steal'].mean()
-        steal_max = df['%steal'].max()
+        steal_p99 = df['%steal'].quantile(0.99)
         if steal_avg > 5:
             flags.append(_flag('red',
-                f'<b>CPU steal time</b>: avg {steal_avg:.1f}%, peak {steal_max:.1f}% — '
+                f'<b>CPU steal time</b>: avg {steal_avg:.1f}%, p99 peak {steal_p99:.1f}% — '
                 f'hypervisor is scheduling away CPU time. This system is resource-contended '
                 f'at the VM host level.'))
         elif steal_avg > 1:
@@ -224,6 +224,16 @@ async def analyze(section_text: str) -> str:
 
     fig.update_yaxes(title_text='%', showgrid=True, gridcolor='#e8edf5',
                      range=[0, 100], row=1, col=1)
+    if has_idle:
+        # Matches the idle<10/idle<25 insight thresholds above, expressed as %used.
+        for y, color, label in [(90, '#dc2626', 'near saturation (90% used)'),
+                                 (75, '#d97706', 'high utilisation (75% used)')]:
+            fig.add_hline(
+                y=y, row=1, col=1,
+                line=dict(color=color, width=1, dash='dash'),
+                annotation_text=label, annotation_position='top left',
+                annotation_font=dict(size=9, color=color), opacity=0.7,
+            )
     fig.update_xaxes(showgrid=True, gridcolor='#e8edf5', tickangle=-30)
     fig.update_layout(
         height=280,
