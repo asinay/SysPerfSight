@@ -1,4 +1,4 @@
-# SysPerfSight
+# `> SysPerfSight`
 
 A web tool for analyzing InterSystems IRIS SystemPerformance HTML reports (and older Caché pButtons reports — Windows and Linux). Upload a report, choose which sections to keep, and download a clean analyzed copy — with inline charts, insights, and cross-section synthesis — without sharing data you didn't intend to.
 
