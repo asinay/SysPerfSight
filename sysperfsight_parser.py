@@ -74,6 +74,44 @@ class Section:
     sensitive_reason: Optional[str] = None
 
 
+# Browsers re-serialize their parsed DOM when a report is saved via "Save Page As"
+# instead of saving/copying the raw source. The result looks identical on screen
+# but restructures the section-heading markup: quotes every attribute, explicitly
+# closes void elements (`noshade=""></hr>`, `<br />`), and splits the single
+# `<b><font><div id=...></div>TITLE</font></b>` heading into three separate
+# `<b><font>` blocks (empty one before the div, empty one nested inside it, and a
+# third one after `</div>` holding the actual title text). These patterns undo
+# that reshaping back into the form `anchor_pattern`/`config_pattern` expect.
+_RESERIALIZED_HR_RE = re.compile(
+    r'<hr\s+size="4"\s+noshade(?:="")?\s*/?>(?:\s*</hr>)?', re.IGNORECASE
+)
+_RESERIALIZED_HEAD_RE = re.compile(
+    r'(?P<popen><p>)?\s*<b>\s*<font(?P<attrs>[^>]*)>\s*</font>\s*</b>\s*(?P<pclose></p>)?'
+    r'\s*<div id=(?P<q>["\']?)(?P<id>[^"\'>\s]+)(?P=q)>'
+    r'\s*(?:<b>\s*<font[^>]*>\s*</font>\s*</b>)?'
+    r'\s*</div>'
+    r'\s*(?:<b>\s*<font[^>]*>)?'
+    r'\s*(?P<title>[^<]+?)\s*'
+    r'</font>\s*</b>',
+    re.IGNORECASE
+)
+
+
+def _fix_reserialized_head(m: re.Match) -> str:
+    popen = m.group('popen') or ''
+    pclose = m.group('pclose') or ''
+    # Always quote the id: anchor_pattern tolerates quoted or bare, but
+    # config_pattern (Configuration/Profile) requires quotes.
+    return f'{popen}<b><font{m.group("attrs")}><div id="{m.group("id")}"></div>{m.group("title")}</font></b>{pclose}'
+
+
+def _normalize_reserialized_html(html: str) -> str:
+    """Undo browser DOM-reserialization of the section-heading markup (see above)."""
+    html = _RESERIALIZED_HR_RE.sub('<hr size="4" noshade>', html)
+    html = _RESERIALIZED_HEAD_RE.sub(_fix_reserialized_head, html)
+    return html
+
+
 def parse_sections(html: str) -> tuple[str, list[Section]]:
     """
     Parse a SystemPerformance HTML file into its header and individual sections.
@@ -104,6 +142,17 @@ def parse_sections(html: str) -> tuple[str, list[Section]]:
     )
 
     matches = list(anchor_pattern.finditer(html))
+
+    if not matches:
+        # Fall back to undoing a browser DOM-reserialization before giving up.
+        # Only ever swaps `html` for the normalized version if that actually
+        # produces matches, so a genuinely unrecognized file still returns [].
+        normalized = _normalize_reserialized_html(html)
+        if normalized != html:
+            normalized_matches = list(anchor_pattern.finditer(normalized))
+            if normalized_matches:
+                html = normalized
+                matches = normalized_matches
 
     if not matches:
         return html, []

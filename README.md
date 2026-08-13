@@ -115,11 +115,31 @@ Selected sections with an analyzer get inline charts and insights injected above
 | perfmon | CPU utilization, processor queue, available memory, paging, network throughput charts; disk %busy/queue/IOPS/throughput/latency charts broken out **per physical drive**; insights and reference lines to match |
 | CPF file | Database configuration, namespace mappings, and key parameter summary |
 
+## Troubleshooting: "No sections found"
+
+The parser locates sections with a couple of regexes matched against exact
+HTML tag scaffolding (`<hr size="4" noshade>`, `<div id=...>`). If an upload
+comes back with a 0-section error, the report's markup differs from every
+variant the parser currently knows about.
+
+Run `diagnose_report.py` against the file to see why, without exposing any
+of the actual report data:
+
+```bash
+python3 diagnose_report.py path/to/report.html
+```
+
+It prints only the HTML tag scaffolding around section boundaries — never
+the contents of a `<pre>` block, which is where hostnames, paths, and other
+sensitive data live. That output is safe to paste into a bug report. See the
+script's docstring for options (`--max`, `--context`, `--max-len`).
+
 ## Project structure
 
 ```
 app.py                  FastAPI backend (upload + export endpoints)
 sysperfsight_parser.py  HTML parsing and section reconstruction logic
+diagnose_report.py      Standalone diagnostic for "No sections found" failures
 static/index.html       Single-page frontend (no build step)
 analyzers/              Per-section analysis modules
 requirements.txt        Python dependencies
