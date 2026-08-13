@@ -111,9 +111,14 @@
       font-family: var(--font-mono);
     }
 
-    /* Dark mode toggle button */
-    .dark-toggle {
+    /* Header links (help / GitHub) + dark mode toggle */
+    .header-links {
       margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .header-link, .dark-toggle {
       background: transparent;
       border: 1px solid var(--border);
       color: var(--text-muted);
@@ -121,14 +126,27 @@
       padding: 6px 11px;
       font-size: 0.78rem;
       font-family: var(--font-mono);
+      text-decoration: none;
       cursor: pointer;
       display: flex;
       align-items: center;
       gap: 7px;
       transition: border-color .15s, color .15s;
     }
-    .dark-toggle:hover { border-color: var(--accent); color: var(--text); }
-    .dark-toggle svg { width: 14px; height: 14px; flex-shrink: 0; }
+    .header-link:hover, .dark-toggle:hover { border-color: var(--accent); color: var(--text); }
+    .header-link svg, .dark-toggle svg { width: 13px; height: 13px; flex-shrink: 0; }
+
+    /* ---- Footer ---- */
+    footer {
+      text-align: center;
+      padding: 28px 16px 36px;
+      font-size: 0.76rem;
+      color: var(--text-faint);
+      font-family: var(--font-mono);
+    }
+    footer a { color: var(--text-faint); text-decoration: none; transition: color .15s; }
+    footer a:hover { color: var(--accent); }
+    footer .sep { margin: 0 8px; color: var(--border-hover); }
 
     main {
       max-width: 860px;
@@ -383,14 +401,28 @@
 <header>
   <div class="wordmark"><span class="prompt">&gt;</span> SysPerfSight</div>
   <span class="tagline">iris/cache systemperformance report analyzer</span>
-  <button class="dark-toggle" id="dark-toggle" onclick="toggleDark()" title="Toggle theme">
-    <svg id="dark-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
-    <svg id="dark-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
-      <circle cx="12" cy="12" r="4"/>
-      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
-    </svg>
-    <span id="dark-label">Light mode</span>
-  </button>
+  <div class="header-links">
+    <a class="header-link" href="static/help.html" target="_blank" title="FAQ: export modes, time filtering, sensitive data, troubleshooting">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="7"/><path d="M8 11V8M8 5.5v.5"/></svg>
+      FAQ
+    </a>
+    <a class="header-link" href="https://github.com/asinay/SysPerfSight/issues/new?labels=bug" target="_blank" title="Report a bug on GitHub">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      Report bug
+    </a>
+    <a class="header-link" href="https://github.com/asinay/SysPerfSight/issues/new?labels=enhancement" target="_blank" title="Request a feature on GitHub">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+      Request feature
+    </a>
+    <button class="dark-toggle" id="dark-toggle" onclick="toggleDark()" title="Toggle theme">
+      <svg id="dark-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
+      <svg id="dark-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+        <circle cx="12" cy="12" r="4"/>
+        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+      </svg>
+      <span id="dark-label">Light mode</span>
+    </button>
+  </div>
 </header>
 
 <main>
@@ -464,6 +496,14 @@
 
 </main>
 
+<footer>
+  <a href="https://github.com/asinay/SysPerfSight" target="_blank">SysPerfSight on GitHub</a>
+  <span class="sep">&middot;</span>
+  <a href="https://github.com/asinay/SysPerfSight/issues/new?labels=bug" target="_blank">Report bug</a>
+  <span class="sep">&middot;</span>
+  <a href="https://github.com/asinay/SysPerfSight/issues/new?labels=enhancement" target="_blank">Request feature</a>
+</footer>
+
 <script>
   // ---- Theme ----
   (function initTheme() {
@@ -510,7 +550,7 @@
     const fd = new FormData();
     fd.append('file', file);
     try {
-      const res = await fetch('/upload', { method: 'POST', body: fd });
+      const res = await fetch('upload', { method: 'POST', body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Upload failed');
       sessionId = data.session_id;
@@ -647,7 +687,7 @@
       const timeFrom = timeFromEl.value.trim();
       const timeTo   = timeToEl.value.trim();
 
-      const res = await fetch('/export', {
+      const res = await fetch('export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

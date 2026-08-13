@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FAQ — SysPerfSight</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0b0d12;
+    --card-bg: #12151c;
+    --text: #e4e7ec;
+    --text-muted: #8b93a3;
+    --text-faint: #5c6474;
+    --border: #232833;
+    --accent: #2dd4bf;
+    --accent-strong: #5eead4;
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    font-size: 14px;
+  }
+  header {
+    background: var(--card-bg);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 32px;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  header .wordmark {
+    font-family: var(--font-mono);
+    font-size: 1.05rem;
+    font-weight: 600;
+    letter-spacing: -.01em;
+  }
+  header .wordmark .prompt { color: var(--accent); }
+  header .tagline { font-size: 0.78rem; color: var(--text-muted); font-family: var(--font-mono); }
+  header a {
+    margin-left: auto;
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 0.82rem;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 6px 11px;
+    font-family: var(--font-mono);
+    transition: border-color .15s, color .15s;
+  }
+  header a:hover { border-color: var(--accent); color: var(--text); }
+
+  main { max-width: 780px; margin: 32px auto; padding: 0 16px 48px; }
+
+  h2 { font-size: 1rem; font-weight: 600; margin: 28px 0 10px; color: var(--text); }
+  h2:first-child { margin-top: 0; }
+  h3 { font-size: 0.9rem; font-weight: 600; margin: 16px 0 6px; color: var(--text-muted); }
+  p, li { font-size: 0.88rem; color: var(--text-muted); margin-bottom: 8px; }
+  ul, ol { padding-left: 1.3rem; margin-bottom: 8px; }
+  a { color: var(--accent); }
+
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 22px 26px;
+    margin-bottom: 18px;
+  }
+
+  code {
+    font-family: var(--font-mono);
+    background: #1b2029;
+    border-radius: 3px;
+    padding: 1px 6px;
+    font-size: 0.82rem;
+    color: var(--accent-strong);
+  }
+  pre {
+    font-family: var(--font-mono);
+    background: #1b2029;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 12px 14px;
+    font-size: 0.82rem;
+    color: var(--text);
+    overflow-x: auto;
+    margin-bottom: 8px;
+  }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.84rem; margin-bottom: 8px; }
+  th { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-family: var(--font-mono); font-size: 0.76rem; text-transform: uppercase; letter-spacing: .03em; }
+  td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+
+  .note {
+    background: #0f231f;
+    border: 1px solid #1e4a41;
+    border-left: 2px solid var(--accent);
+    border-radius: 3px;
+    padding: 10px 14px;
+    font-size: 0.84rem;
+    color: #a7ded2;
+    margin-bottom: 8px;
+  }
+  .warn {
+    background: #241d0a;
+    border: 1px solid #5a4413;
+    border-left: 2px solid #f0c96b;
+    border-radius: 3px;
+    padding: 10px 14px;
+    font-size: 0.84rem;
+    color: #f0c96b;
+    margin-bottom: 8px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wordmark"><span class="prompt">&gt;</span> SysPerfSight</div>
+  <span class="tagline">faq</span>
+  <a href="../">&larr; Back to app</a>
+</header>
+
+<main>
+
+  <div class="card">
+    <p>SysPerfSight analyzes the HTML report produced by InterSystems IRIS's <strong>SystemPerformance</strong> utility
+    (known as <strong>pButtons</strong> on older Caché installations). This page covers how to get the most out of it
+    once you already have a report in hand — not how to generate one.</p>
+  </div>
+
+  <h2>Export modes</h2>
+  <div class="card">
+    <p>After selecting sections, you can export in three ways:</p>
+    <ul>
+      <li><strong>Full report</strong> — everything: charts, written insights, raw data, cross-section synthesis,
+        and sensitive-section banners. Best for your own investigation.</li>
+      <li><strong>Charts + Raw</strong> — charts and the collapsed raw data, but no written insights or synthesis.
+        Good for a lighter file you still want the underlying numbers in.</li>
+      <li><strong>Charts only</strong> — just the charts; no raw data, no insights, no synthesis, and excluded
+        sections are hidden entirely rather than shown as placeholders. Smallest, most shareable output.</li>
+    </ul>
+  </div>
+
+  <h2>Time-range filtering</h2>
+  <div class="card">
+    <p>Some sections (mgstat, vmstat, sar -u, sar -d, iostat) support filtering to a specific time window before
+    export. Enter <strong>From</strong>/<strong>To</strong> as 24-hour <code>HH:MM</code> — e.g. <code>14:30</code>,
+    not <code>2:30 PM</code>. Leave either side blank for an open-ended range. A range where "From" is later than
+    "To" (e.g. <code>22:00</code> to <code>02:00</code>) is treated as crossing midnight.</p>
+    <p>This is most useful when you know roughly when an issue occurred and want the charts/insights to focus on
+    just that window instead of the whole collection period.</p>
+  </div>
+
+  <h2>Sensitive data in the report</h2>
+  <div class="card">
+    <p>Some sections of a SystemPerformance report can contain information you may not want to share outside your
+    organization: license keys, hostnames/usernames, file paths, or full process/task lists. SysPerfSight
+    pre-deselects these sections after upload and explains why — review the flagged sections before exporting if
+    you plan to hand the output to someone else (e.g. a vendor or support case).</p>
+  </div>
+
+  <h2>Supported formats</h2>
+  <div class="card">
+    <p>SysPerfSight parses both:</p>
+    <ul>
+      <li><strong>InterSystems IRIS</strong> — reports from <code>^SystemPerformance</code>.</li>
+      <li><strong>Older Caché</strong> — reports from <code>^pButtons</code>, which use slightly different internal
+        section names for a handful of sections (e.g. <code>ccontrol all</code> instead of <code>IRIS ALL</code>).
+        SysPerfSight detects and maps these automatically — you don't need to do anything differently.</li>
+    </ul>
+  </div>
+
+  <h2>Troubleshooting upload errors</h2>
+  <div class="card">
+    <p>If SysPerfSight reports <strong>"No sections found"</strong> on upload, the most common cause is that the
+    file was re-saved by a browser (e.g. opened the report and used "Save Page As") instead of being taken directly
+    from where <code>^SystemPerformance</code>/<code>^pButtons</code> wrote it — browsers can rewrite the HTML
+    structure in ways that look identical on screen but confuse a parser.</p>
+    <ol>
+      <li>Re-upload the original file straight from the manager's directory (or wherever the utility wrote it),
+        rather than a browser-resaved copy.</li>
+      <li>If the file was emailed or extracted from a zip, confirm it wasn't altered in transit and is still a
+        complete, single <code>.html</code> file.</li>
+    </ol>
+    <p>If it still won't parse, use "Report bug" in the app header — SysPerfSight's error message includes a
+    diagnostic hint (whether the file has no report markers at all, versus markers in an unrecognized layout) that's
+    useful to include.</p>
+  </div>
+
+</main>
+</body>
+</html>
