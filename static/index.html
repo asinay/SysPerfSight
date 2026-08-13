@@ -544,6 +544,19 @@
     if (e.dataTransfer.files[0]) uploadFile(e.dataTransfer.files[0]);
   });
 
+  // Builds a readable error message even when the response body isn't JSON
+  // (e.g. a proxy/gateway in front of the app rejected the request and returned its own HTML error page).
+  async function describeFailedResponse(res, fallbackVerb) {
+    let data = null;
+    try { data = await res.json(); } catch {}
+    if (data && data.detail) return data.detail;
+    if (res.status === 413) {
+      return `${fallbackVerb} failed: file too large (HTTP 413). A proxy in front of this app is rejecting the ` +
+        `request before it reaches the server — its upload size limit needs to be raised.`;
+    }
+    return `${fallbackVerb} failed (HTTP ${res.status} ${res.statusText})`;
+  }
+
   // ---- Upload ----
   async function uploadFile(file) {
     showStatus('info', `<span class="spinner"></span>Parsing <strong>${file.name}</strong>…`);
@@ -551,8 +564,8 @@
     fd.append('file', file);
     try {
       const res = await fetch('upload', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(await describeFailedResponse(res, 'Upload'));
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Upload failed');
       sessionId = data.session_id;
       allSections = data.sections;
       renderSections(data.filename, data.sections);
@@ -699,10 +712,7 @@
           mode: mode,
         }),
       });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || 'Export failed');
-      }
+      if (!res.ok) throw new Error(await describeFailedResponse(res, 'Export'));
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
