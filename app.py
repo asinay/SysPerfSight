@@ -44,6 +44,19 @@ async def upload_file(file: UploadFile = File(...)):
 
     header_html, sections = parse_sections(html)
 
+    if not sections:
+        hint = (
+            "the file doesn't contain the expected '<hr size=\"4\" noshade>' section markers at all"
+            if 'noshade' not in html.lower()
+            else "the file has section markers but not in a layout this parser recognizes "
+                 "(unrecognized SystemPerformance/pButtons HTML variant)"
+        )
+        raise HTTPException(
+            400,
+            f"No sections found — {hint}. Please confirm this is an unmodified "
+            "InterSystems IRIS SystemPerformance (or Caché pButtons) HTML export.",
+        )
+
     session_id = str(uuid.uuid4())
     sessions[session_id] = (header_html, sections)
 
