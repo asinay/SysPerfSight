@@ -36,13 +36,13 @@ Selected sections get charts injected above the raw data:
 Requires [Docker](https://docs.docker.com/get-docker/).
 
 ```bash
-docker run -p 8765:8765 --name sysperfsight ghcr.io/asinay/sysperf-sight
+docker run -p 8765:8765 --name sysperfsight ghcr.io/asinay/sysperfsight
 ```
 
 If port 8765 is already in use, pick any free port (e.g. 8080):
 
 ```bash
-docker run -p 8080:8765 --name sysperfsight ghcr.io/asinay/sysperf-sight
+docker run -p 8080:8765 --name sysperfsight ghcr.io/asinay/sysperfsight
 ```
 
 Or build and run locally:
