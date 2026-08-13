@@ -417,7 +417,8 @@ def build_output(
   --excl-block-bg:#fafafa;--excl-block-border:#ddd;--excl-icon:#ccc;--excl-title:#bbb;--excl-sub:#ccc;
   --sens-bg:#fffbeb;--sens-border:#f59e0b;--sens-color:#92400e;
   --scrollbar:#ddd;
-  --topbar-badge:rgba(255,255,255,.15);
+  --header-bg:#fff;--header-border:#dde1e7;--accent:#0d9488;--accent-strong:#0b7a70;
+  --font-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
 }}
 body.dark{{
   --bg:#0f1117;--card:#1a1d27;--text:#e2e4ed;--text-dim:#8896b0;--text-muted:#6b7280;
@@ -429,19 +430,20 @@ body.dark{{
   --excl-block-bg:#13161f;--excl-block-border:#2d3148;--excl-icon:#3a4060;--excl-title:#4a5280;--excl-sub:#3a4060;
   --sens-bg:#2a1f00;--sens-border:#92400e;--sens-color:#fcd34d;
   --scrollbar:#2d3148;
-  --topbar-badge:rgba(255,255,255,.1);
+  --header-bg:#0b0d12;--header-border:#1c2029;--accent:#2dd4bf;--accent-strong:#5eead4;
 }}
 
 body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);display:flex;flex-direction:column;height:100vh;overflow:hidden;transition:background .2s,color .2s}}
 
 /* Top bar */
-.topbar{{background:#003366;color:#fff;padding:10px 20px;display:flex;align-items:center;gap:16px;flex-shrink:0;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,.3)}}
-.topbar h1{{font-size:1rem;font-weight:700;white-space:nowrap}}
-.topbar .meta{{font-size:0.75rem;opacity:.75;display:flex;gap:12px;flex-wrap:wrap}}
-.topbar .meta span::before{{content:"·";margin-right:8px;opacity:.5}}
-.topbar .badge{{background:var(--topbar-badge);border-radius:4px;padding:2px 8px;font-size:0.7rem;margin-left:auto;white-space:nowrap}}
-.dark-toggle{{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;border-radius:5px;padding:4px 10px;font-size:0.75rem;cursor:pointer;white-space:nowrap}}
-.dark-toggle:hover{{background:rgba(255,255,255,.22)}}
+.topbar{{background:var(--header-bg);color:var(--text);border-bottom:1px solid var(--header-border);padding:14px 32px;display:flex;align-items:baseline;gap:10px;flex-shrink:0;z-index:10;transition:background .2s,border-color .2s}}
+.topbar .wordmark{{font-family:var(--font-mono);font-size:1.05rem;font-weight:600;letter-spacing:-.01em;display:flex;align-items:center;gap:6px;white-space:nowrap}}
+.topbar .wordmark .prompt{{color:var(--accent)}}
+.topbar .meta{{font-size:0.78rem;color:var(--text-dim);font-family:var(--font-mono);display:flex;gap:0;flex-wrap:wrap}}
+.topbar .meta span:not(:first-child)::before{{content:"·";margin:0 8px;opacity:.5}}
+.dark-toggle{{margin-left:auto;background:transparent;border:1px solid var(--header-border);color:var(--text-dim);border-radius:3px;padding:6px 11px;font-size:0.78rem;font-family:var(--font-mono);cursor:pointer;display:flex;align-items:center;gap:7px;white-space:nowrap;transition:border-color .15s,color .15s}}
+.dark-toggle:hover{{border-color:var(--accent);color:var(--text)}}
+.dark-toggle svg{{width:13px;height:13px;flex-shrink:0}}
 
 /* Layout */
 .layout{{display:flex;flex:1;overflow:hidden}}
@@ -503,15 +505,21 @@ body.dark .raw-toggle{{color:#4d9fff}}
 <body>
 
 <div class="topbar">
-  <h1>SysPerfSight</h1>
+  <div class="wordmark"><span class="prompt">&gt;</span> SysPerfSight</div>
   <div class="meta">
     {f'<span>{instance_name}</span>' if instance_name else ''}
     {f'<span>{machine_name}</span>' if machine_name else ''}
     {f'<span>{run_time}</span>' if run_time else ''}
     {f'<span>{user_name}</span>' if user_name else ''}
   </div>
-  <span class="badge">SysPerfSight</span>
-  <button class="dark-toggle" onclick="toggleDark()" id="dark-toggle">🌙 Dark</button>
+  <button class="dark-toggle" onclick="toggleDark()" id="dark-toggle" title="Toggle theme">
+    <svg id="dark-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
+    <svg id="dark-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+      <circle cx="12" cy="12" r="4"/>
+      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+    </svg>
+    <span id="dark-label">Dark mode</span>
+  </button>
 </div>
 
 <div class="layout">
@@ -531,8 +539,12 @@ body.dark .raw-toggle{{color:#4d9fff}}
 }})();
 function applyDark(on){{
   document.body.classList.toggle('dark', on);
-  const btn = document.getElementById('dark-toggle');
-  if (btn) btn.textContent = on ? '☀️ Light' : '🌙 Dark';
+  const moon = document.getElementById('dark-icon-moon');
+  const sun = document.getElementById('dark-icon-sun');
+  const label = document.getElementById('dark-label');
+  if (moon) moon.style.display = on ? 'none' : '';
+  if (sun) sun.style.display = on ? '' : 'none';
+  if (label) label.textContent = on ? 'Light mode' : 'Dark mode';
 }}
 function toggleDark(){{
   const on = !document.body.classList.contains('dark');
