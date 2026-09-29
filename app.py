@@ -4,7 +4,7 @@ import copy
 import os
 import re as _re
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -29,6 +29,19 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 # keeps the event loop free and lets asyncio.wait_for enforce a deadline below.
 _EXECUTOR = ThreadPoolExecutor(max_workers=max(4, os.cpu_count() or 4))
 
+# Per-section analyzers are pure CPU work (pandas/regex/Plotly) with no actual
+# awaiting, so running them via asyncio.gather() over a thread pool doesn't give
+# real concurrency — CPython's GIL means only one thread runs Python bytecode at
+# a time, so N analyzers on N threads still mostly serialize (pandas/numpy release
+# the GIL for their own vectorized calls, but the regex-heavy parsing that precedes
+# them doesn't). A process pool gives genuine parallelism across sections: each
+# worker is a separate interpreter with its own GIL, so e.g. sar-d and iostat (the
+# two slowest analyzers on a typical Linux capture) actually run at the same time
+# instead of back-to-back. Sized to match docker-compose.yml's CPU limit by default
+# — override with SYSPERFSIGHT_ANALYZER_WORKERS if that limit changes.
+_ANALYZER_WORKERS = max(1, min(int(os.environ.get("SYSPERFSIGHT_ANALYZER_WORKERS", 4)), os.cpu_count() or 4))
+_ANALYZER_POOL = ProcessPoolExecutor(max_workers=_ANALYZER_WORKERS)
+
 # Safety nets, not expected durations — normal files should finish in well under
 # these. They exist so a pathological file fails fast with a clear message
 # instead of hanging the request forever.
@@ -40,6 +53,7 @@ EXPORT_TIMEOUT_S = 900
 async def lifespan(_app):
     yield
     _EXECUTOR.shutdown(wait=False)
+    _ANALYZER_POOL.shutdown(wait=False)
 
 
 app = FastAPI(title="SysPerfSight", lifespan=lifespan)
@@ -149,20 +163,31 @@ def _prepare_sections_sync(sections, selected_ids, time_from, time_to):
 
 
 def _analyze_sync(fn, text: str) -> str:
-    """Run an analyzer's `async def analyze()` synchronously in a worker thread.
-    None of the analyzers actually await anything — they're synchronous
-    pandas/regex/Plotly work wearing an async interface — so this just executes
-    them without needing an event loop of their own beyond what asyncio.run sets up."""
+    """Run an analyzer's `async def analyze()` synchronously — in a worker process
+    for the per-section analyzers, or a worker thread for synthesis (see call sites).
+    None of them actually await anything — they're synchronous pandas/regex/Plotly
+    work wearing an async interface — so this just executes them without needing an
+    event loop of their own beyond what asyncio.run sets up."""
     return asyncio.run(fn(text))
 
 
 async def _run_analyzer(loop, section_id: str, fn, text: str):
     try:
-        html = await loop.run_in_executor(_EXECUTOR, _analyze_sync, fn, text)
+        html = await loop.run_in_executor(_ANALYZER_POOL, _analyze_sync, fn, text)
         return section_id, html
     except Exception:
         print(f'[analyzer] {section_id} EXCEPTION:\n{traceback.format_exc()}', flush=True)
         return section_id, ''
+
+
+async def _run_synthesis(loop, section_texts: dict):
+    """Synthesis only needs section_texts, not the analyzers' HTML output, so it can
+    run at the same time as the per-section analyzers instead of waiting for them."""
+    try:
+        return await loop.run_in_executor(_EXECUTOR, _analyze_sync, synthesize, section_texts)
+    except Exception:
+        print(f'[synthesis] EXCEPTION:\n{traceback.format_exc()}', flush=True)
+        return ''
 
 
 @app.post("/export")
@@ -188,32 +213,27 @@ async def export_file(req: ExportRequest):
         loop.run_in_executor(_EXECUTOR, _prepare_sections_sync, sections, req.selected_ids, req.time_from, req.time_to)
     )
 
-    # Run all applicable analyzers in parallel for selected sections. Each one runs
-    # in its own worker thread — pandas/numpy release the GIL for their vectorized
-    # work, so this gets real overlap between sections instead of the previous
-    # asyncio.gather() over purely synchronous coroutines (which never yielded,
-    # so it ran every analyzer back-to-back on the same thread regardless of "parallel").
+    # Run all applicable analyzers for selected sections, each in its own worker
+    # process (see _ANALYZER_POOL above for why processes rather than threads).
+    # Synthesis doesn't depend on the analyzers' output — only on section_texts —
+    # so it's kicked off in the same gather() rather than awaited afterward.
     analyzable = [(s.id, SECTION_ANALYZERS[s.id]) for s in sections
                   if s.id in req.selected_ids and s.id in SECTION_ANALYZERS]
-    results = await _with_timeout(asyncio.gather(*[
-        _run_analyzer(loop, sid, fn, section_texts[sid]) for sid, fn in analyzable
-    ]))
+    analyzer_tasks = [_run_analyzer(loop, sid, fn, section_texts[sid]) for sid, fn in analyzable]
+
+    if req.mode == 'full':
+        *results, synthesis_html = await _with_timeout(
+            asyncio.gather(*analyzer_tasks, _run_synthesis(loop, section_texts))
+        )
+    else:
+        results = await _with_timeout(asyncio.gather(*analyzer_tasks))
+        synthesis_html = ''
+
     analysis = {sid: html for sid, html in results if html}
 
     if req.mode in ('charts_only', 'charts_raw'):
         analysis = {sid: _re.sub(r'<!--INS-->.*?<!--/INS-->', '', html, flags=_re.DOTALL)
                     for sid, html in analysis.items()}
-        synthesis_html = ''
-    else:
-        try:
-            synthesis_html = await _with_timeout(
-                loop.run_in_executor(_EXECUTOR, _analyze_sync, synthesize, section_texts)
-            )
-        except HTTPException:
-            raise
-        except Exception:
-            print(f'[synthesis] EXCEPTION:\n{traceback.format_exc()}', flush=True)
-            synthesis_html = ''
 
     output_html = await _with_timeout(
         loop.run_in_executor(_EXECUTOR, build_output, header_html, sections, req.selected_ids, analysis, synthesis_html, req.mode)
