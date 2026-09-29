@@ -68,8 +68,22 @@ def _parse_iostat(text: str) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
                 except ValueError:
                     pass
 
-    return (pd.DataFrame(dev_records) if dev_records else None,
-            pd.DataFrame(cpu_records) if cpu_records else None)
+    dev_df = pd.DataFrame(dev_records) if dev_records else None
+    cpu_df = pd.DataFrame(cpu_records) if cpu_records else None
+
+    # Cap intervals before charting/insights, same as perfmon's disk_df — a long capture
+    # can have thousands of timestamps across multiple devices, which multiplies out to a
+    # very large number of chart points. Downsample by timestamp so every device/metric
+    # keeps the same reduced set of intervals rather than being decimated independently.
+    for df in (dev_df, cpu_df):
+        if df is None:
+            continue
+        uniq_ts = df['dt'].unique()
+        if len(uniq_ts) > 1000:
+            keep_ts = set(sorted(uniq_ts)[::len(uniq_ts) // 1000])
+            df.drop(df.index[~df['dt'].isin(keep_ts)], inplace=True)
+
+    return dev_df, cpu_df
 
 
 def _flag(level: str, text: str) -> str:

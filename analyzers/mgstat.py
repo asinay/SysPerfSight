@@ -48,6 +48,13 @@ def _parse_mgstat(text: str) -> pd.DataFrame | None:
         if col not in ('Date', 'Time', 'dt'):
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
+    # Cap rows before charting/insights — a multi-day capture at short intervals can be
+    # tens/hundreds of thousands of rows across 8 subplots, which is both slow to render
+    # and mostly redundant visually. Matches the row cap already used by vmstat/perfmon.
+    if len(df) > 1000:
+        step = len(df) // 1000
+        df = df.iloc[::step].reset_index(drop=True)
+
     return df
 
 

@@ -383,7 +383,7 @@
     .sensitive-banner b svg { width: 13px; height: 13px; flex-shrink: 0; }
 
     /* ---- Alerts ---- */
-    #status {
+    .status-box {
       padding: 10px 14px;
       border-radius: 3px;
       font-size: 0.84rem;
@@ -391,9 +391,9 @@
       margin-top: 12px;
       font-family: var(--font-mono);
     }
-    #status.error { background: var(--status-err-bg); color: var(--status-err-color); border: 1px solid var(--status-err-border); }
-    #status.success { background: var(--status-ok-bg); color: var(--status-ok-color); border: 1px solid var(--status-ok-border); }
-    #status .glyph { font-weight: 700; margin-right: 4px; }
+    .status-box.error { background: var(--status-err-bg); color: var(--status-err-color); border: 1px solid var(--status-err-border); }
+    .status-box.success { background: var(--status-ok-bg); color: var(--status-ok-color); border: 1px solid var(--status-ok-border); }
+    .status-box .glyph { font-weight: 700; margin-right: 4px; }
   </style>
 </head>
 <body class="dark">
@@ -442,7 +442,7 @@
       <p><strong>Drop your SystemPerformance .html file here</strong><br>or click to browse</p>
       <p class="hint">// accepts .html exports from InterSystems IRIS SystemPerformance or Caché pButtons</p>
     </div>
-    <div id="status"></div>
+    <div id="status" class="status-box"></div>
   </div>
 
   <!-- Step 2: Select sections -->
@@ -492,6 +492,7 @@
       <button class="btn-secondary" id="charts-btn" onclick="exportFile('charts_only')" disabled>Charts only</button>
       <button class="btn-primary" id="export-btn" onclick="exportFile('full')">Full report</button>
     </div>
+    <div id="export-status" class="status-box"></div>
   </div>
 
 </main>
@@ -683,23 +684,37 @@
     const chartsBtn   = document.getElementById('charts-btn');
     const chartsRawBtn = document.getElementById('charts-raw-btn');
     const btn = mode === 'charts_only' ? chartsBtn : mode === 'charts_raw' ? chartsRawBtn : exportBtn;
+
+    const timeFromEl = document.getElementById('time-from');
+    const timeToEl   = document.getElementById('time-to');
+    const _validTime = v => v === '' || /^\d{1,2}:\d{2}$/.test(v.trim());
+    timeFromEl.classList.toggle('invalid', !_validTime(timeFromEl.value));
+    timeToEl.classList.toggle('invalid',   !_validTime(timeToEl.value));
+    if (!_validTime(timeFromEl.value) || !_validTime(timeToEl.value)) {
+      showExportStatus('error', 'Time must be in HH:MM 24-hour format (e.g. 02:30)');
+      return;
+    }
+    const timeFrom = timeFromEl.value.trim();
+    const timeTo   = timeToEl.value.trim();
+
     exportBtn.disabled = true;
     chartsBtn.disabled = true;
     chartsRawBtn.disabled = true;
     btn.textContent = 'Generating…';
 
-    try {
-      const timeFromEl = document.getElementById('time-from');
-      const timeToEl   = document.getElementById('time-to');
-      const _validTime = v => v === '' || /^\d{1,2}:\d{2}$/.test(v.trim());
-      timeFromEl.classList.toggle('invalid', !_validTime(timeFromEl.value));
-      timeToEl.classList.toggle('invalid',   !_validTime(timeToEl.value));
-      if (!_validTime(timeFromEl.value) || !_validTime(timeToEl.value)) {
-        throw new Error('Time must be in HH:MM 24-hour format (e.g. 02:30)');
-      }
-      const timeFrom = timeFromEl.value.trim();
-      const timeTo   = timeToEl.value.trim();
+    // Large reports can legitimately take a couple of minutes to analyze — show a
+    // live elapsed-time counter so it's clear the request is still working rather
+    // than stuck, and reassure the user the longer it runs.
+    const startedAt = Date.now();
+    const tick = () => {
+      const secs = Math.round((Date.now() - startedAt) / 1000);
+      const note = secs < 20 ? '' : ' — large reports can take a few minutes, still working…';
+      showExportStatus('info', `<span class="spinner"></span>Generating report… ${secs}s elapsed${note}`);
+    };
+    tick();
+    const progressTimer = setInterval(tick, 1000);
 
+    try {
       const res = await fetch('export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -720,9 +735,11 @@
       a.download = outputFilename;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 60000);
-      showStatus('success', `Downloaded <strong>${outputFilename}</strong> with ${selectedIds.length} sections.`);
+      clearInterval(progressTimer);
+      showExportStatus('success', `Downloaded <strong>${outputFilename}</strong> with ${selectedIds.length} sections.`);
     } catch (err) {
-      showStatus('error', err.message);
+      clearInterval(progressTimer);
+      showExportStatus('error', err.message);
     } finally {
       exportBtn.disabled = false;
       chartsBtn.disabled = false;
@@ -774,12 +791,23 @@
     if (to)   document.getElementById('time-to').value   = to;
   })();
 
-  function showStatus(type, html) {
-    const el = document.getElementById('status');
+  function setStatus(el, type, html) {
     const glyph = type === 'error' ? '✗' : type === 'success' ? '✓' : '';
     el.innerHTML = (glyph ? `<span class="glyph">${glyph}</span>` : '') + html;
-    el.className = type === 'error' ? 'error' : type === 'success' ? 'success' : '';
+    el.className = 'status-box' + (type === 'error' ? ' error' : type === 'success' ? ' success' : '');
     el.style.display = 'block';
+  }
+
+  // Upload status — shown right under the drop zone.
+  function showStatus(type, html) {
+    setStatus(document.getElementById('status'), type, html);
+  }
+
+  // Export status — shown right under the export buttons, not up at the top of the
+  // page, since the button that triggered it can be scrolled far below the drop zone
+  // once a long section list is rendered.
+  function showExportStatus(type, html) {
+    setStatus(document.getElementById('export-status'), type, html);
   }
 </script>
 </body>

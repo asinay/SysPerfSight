@@ -106,6 +106,16 @@ def _parse_sar_d(text: str) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
 
     data_df = pd.DataFrame(records) if records else None
     avg_df  = pd.DataFrame(avg_records) if avg_records else None
+
+    # Cap intervals before charting/insights, same rationale as iostat.py/perfmon.py's
+    # disk_df: a long capture can have thousands of timestamps per device. avg_df is
+    # untouched — it's sar's own per-device Average: line, not a time series.
+    if data_df is not None:
+        uniq_ts = data_df['dt'].unique()
+        if len(uniq_ts) > 1000:
+            keep_ts = set(sorted(uniq_ts)[::len(uniq_ts) // 1000])
+            data_df = data_df[data_df['dt'].isin(keep_ts)].reset_index(drop=True)
+
     return data_df, avg_df
 
 

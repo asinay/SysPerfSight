@@ -160,14 +160,31 @@ def _proc_type(device: str, ns: str, is_tcp: bool) -> str:
     return 'Application'
 
 
+_MAX_SNAPSHOTS = 300
+
+
 def _parse_snapshots(text: str) -> list[dict]:
-    snap_matches = list(_SNAP_HDR_RE.finditer(text))
-    if not snap_matches:
+    all_matches = list(_SNAP_HDR_RE.finditer(text))
+    if not all_matches:
         return []
 
+    # Each snapshot can hold hundreds/thousands of processes, each parsed with several
+    # regexes in _extract_proc — cost scales with total process-line count, not just
+    # snapshot count. A long capture with short %SS intervals can have far more
+    # snapshots than are useful to chart individually, so cap and evenly downsample
+    # which ones get parsed, same rationale as the row caps in vmstat.py/mgstat.py/etc.
+    # Kept snapshots are still bounded by their true neighbor in `all_matches` (not by
+    # the next *kept* one) so a skipped snapshot's processes never leak into a kept one.
+    if len(all_matches) > _MAX_SNAPSHOTS:
+        step = len(all_matches) // _MAX_SNAPSHOTS
+        keep_indices = range(0, len(all_matches), step)
+    else:
+        keep_indices = range(len(all_matches))
+
     snapshots = []
-    for i, m in enumerate(snap_matches):
-        end = snap_matches[i + 1].start() if i + 1 < len(snap_matches) else len(text)
+    for i in keep_indices:
+        m = all_matches[i]
+        end = all_matches[i + 1].start() if i + 1 < len(all_matches) else len(text)
         block = text[m.start():end]
 
         # Skip past the column header line
