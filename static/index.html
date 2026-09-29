@@ -528,6 +528,13 @@
   let sessionId = null;
   let allSections = [];
   let filterableTitles = [];
+  let uploadedFileSize = null;
+
+  function formatBytes(bytes) {
+    if (!bytes) return '';
+    const mb = bytes / (1024 * 1024);
+    return mb >= 1 ? `${mb.toFixed(1)} MB` : `${(bytes / 1024).toFixed(0)} KB`;
+  }
 
   // ---- Drag & drop wiring ----
   const dropZone = document.getElementById('drop-zone');
@@ -569,6 +576,7 @@
       const data = await res.json();
       sessionId = data.session_id;
       allSections = data.sections;
+      uploadedFileSize = file.size;
       renderSections(data.filename, data.sections);
       const now = new Date();
       const ts = now.getFullYear().toString()
@@ -702,14 +710,18 @@
     chartsRawBtn.disabled = true;
     btn.textContent = 'Generating…';
 
-    // Large reports can legitimately take a couple of minutes to analyze — show a
-    // live elapsed-time counter so it's clear the request is still working rather
-    // than stuck, and reassure the user the longer it runs.
+    // Large reports can legitimately take a while to analyze — show a live elapsed-time
+    // counter plus a couple of real numbers (already known client-side, no extra request)
+    // so it's clear the request is working rather than stuck, without turning it into a
+    // wall of stats.
+    const sizeLabel = formatBytes(uploadedFileSize);
+    const detail = [`${selectedIds.length} section${selectedIds.length !== 1 ? 's' : ''}`, sizeLabel]
+      .filter(Boolean).join(', ');
     const startedAt = Date.now();
     const tick = () => {
       const secs = Math.round((Date.now() - startedAt) / 1000);
       const note = secs < 20 ? '' : ' — large reports can take a few minutes, still working…';
-      showExportStatus('info', `<span class="spinner"></span>Generating report… ${secs}s elapsed${note}`);
+      showExportStatus('info', `<span class="spinner"></span>Generating report… ${secs}s elapsed (${detail})${note}`);
     };
     tick();
     const progressTimer = setInterval(tick, 1000);
