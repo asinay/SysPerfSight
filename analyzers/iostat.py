@@ -12,9 +12,12 @@ Expected format: iostat -xmt (repeated intervals with timestamps)
   (repeat)
 """
 import re
+import time
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
+_MAX_CHART_DEVICES = 15
 
 _TS_LINE_RE = re.compile(
     r'^\s*(\d{2}/\d{2}/\d{4}\s+\d{1,2}:\d{2}:\d{2}\s*(?:[AP]M))\s*$',
@@ -27,10 +30,13 @@ _DEV_HEADER_RE = re.compile(r'^\s*Device\s+(.+)', re.IGNORECASE | re.MULTILINE)
 
 
 def _parse_iostat(text: str) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    _t0 = time.monotonic()
     boundaries = list(_TS_LINE_RE.finditer(text))
+    print(f'[timing] iostat: {len(boundaries):,} boundaries found in {time.monotonic() - _t0:.2f}s', flush=True)
     if len(boundaries) < 2:
         return None, None
 
+    _t0 = time.monotonic()
     dev_records, cpu_records = [], []
     for i, m in enumerate(boundaries):
         ts_str = re.sub(r'\s+([AP]M)$', r' \1', m.group(1).strip(), flags=re.IGNORECASE)
@@ -68,13 +74,19 @@ def _parse_iostat(text: str) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
                 except ValueError:
                     pass
 
+    print(f'[timing] iostat: parse loop {time.monotonic() - _t0:.2f}s '
+          f'({len(dev_records):,} dev_records, {len(cpu_records):,} cpu_records)', flush=True)
+
+    _t0 = time.monotonic()
     dev_df = pd.DataFrame(dev_records) if dev_records else None
     cpu_df = pd.DataFrame(cpu_records) if cpu_records else None
+    print(f'[timing] iostat: DataFrame construction {time.monotonic() - _t0:.2f}s', flush=True)
 
     # Cap intervals before charting/insights, same as perfmon's disk_df — a long capture
     # can have thousands of timestamps across multiple devices, which multiplies out to a
     # very large number of chart points. Downsample by timestamp so every device/metric
     # keeps the same reduced set of intervals rather than being decimated independently.
+    _t0 = time.monotonic()
     for df in (dev_df, cpu_df):
         if df is None:
             continue
@@ -82,6 +94,7 @@ def _parse_iostat(text: str) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
         if len(uniq_ts) > 1000:
             keep_ts = set(sorted(uniq_ts)[::len(uniq_ts) // 1000])
             df.drop(df.index[~df['dt'].isin(keep_ts)], inplace=True)
+    print(f'[timing] iostat: downsample {time.monotonic() - _t0:.2f}s', flush=True)
 
     return dev_df, cpu_df
 
@@ -125,6 +138,31 @@ async def analyze(section_text: str) -> str:
     chart_devs   = phys_devs if phys_devs else devices_all
     dev_metrics  = set(dev_df['metric'].unique()) if dev_df is not None else set()
     cpu_metrics  = set(cpu_df['metric'].unique()) if cpu_df is not None else set()
+
+    # A system with many block devices (multipath LUNs, lots of local disks) can put
+    # dozens of devices on one chart — unreadable, and each individual fig.add_trace()
+    # call gets slower as the trace count grows, so 70+ devices × ~7 metrics can turn a
+    # few-second render into minutes. Chart/insights focus on the top N most active
+    # devices by %util; the summary table below still lists every physical device.
+    if dev_df is not None and '%util' in dev_metrics and len(chart_devs) > _MAX_CHART_DEVICES:
+        by_util = (dev_df[dev_df['metric'] == '%util'].groupby('device')['value'].mean()
+                   .reindex(chart_devs).fillna(0).sort_values(ascending=False))
+        top_chart_devs = by_util.head(_MAX_CHART_DEVICES).index.tolist()
+    else:
+        top_chart_devs = chart_devs[:_MAX_CHART_DEVICES]
+
+    # Each chart trace used to re-filter the *entire* dev_df by (device, metric) with a
+    # boolean mask — O(rows) per trace, repeated per trace, over a frame that can still
+    # be ~500k rows after downsampling with many devices/metrics. Pre-group once instead
+    # (and only for the devices we'll actually chart) so each trace is an O(1) dict lookup.
+    if dev_df is not None:
+        _t0 = time.monotonic()
+        dev_groups = {k: v.sort_values('dt') for k, v in
+                      dev_df[dev_df['device'].isin(top_chart_devs)].groupby(['device', 'metric'])}
+        print(f'[timing] iostat: pre-group {len(dev_groups)} (device,metric) series in '
+              f'{time.monotonic() - _t0:.2f}s', flush=True)
+    else:
+        dev_groups = {}
 
     # ── Insights ──────────────────────────────────────────────────────────────
     flags = []
@@ -178,14 +216,17 @@ async def analyze(section_text: str) -> str:
                         f'<b>{dev} {label} avg {v:.1f} ms</b> — moderately elevated. '
                         f'NVMe typically &lt;1 ms; spinning disk typically &lt;10 ms.'))
 
-    # Bursty writes (peak wkB/s > 5× avg)
+    # Bursty writes (peak wkB/s > 5× avg) — one groupby instead of re-filtering the
+    # full dev_df per device (same anti-pattern as the chart traces above).
     if dev_df is not None and 'wkB/s' in dev_metrics:
+        wkb = dev_df[dev_df['metric'] == 'wkB/s'].groupby('device')['value']
+        wkb_mean, wkb_max = wkb.mean(), wkb.max()
         for dev in chart_devs:
-            d = dev_df[(dev_df['device'] == dev) & (dev_df['metric'] == 'wkB/s')]['value']
-            if d.mean() > 0 and d.max() / d.mean() > 5:
+            mean_v, max_v = wkb_mean.get(dev, 0), wkb_max.get(dev, 0)
+            if mean_v > 0 and max_v / mean_v > 5:
                 flags.append(_flag('info',
-                    f'<b>{dev} bursty writes</b>: peak {d.max():.0f} kB/s vs avg {d.mean():.0f} kB/s '
-                    f'({d.max()/d.mean():.0f}× ratio) — write pattern is spiky, not sustained.'))
+                    f'<b>{dev} bursty writes</b>: peak {max_v:.0f} kB/s vs avg {mean_v:.0f} kB/s '
+                    f'({max_v/mean_v:.0f}× ratio) — write pattern is spiky, not sustained.'))
 
     if not flags:
         flags.append(_flag('info', 'No significant anomalies detected in this sample window.'))
@@ -205,22 +246,29 @@ async def analyze(section_text: str) -> str:
     row_defs = []  # (title, fn(fig, row))
     ref_lines: dict[int, list[tuple]] = {}  # row_idx -> [(y, color, label)]
 
+    # Traces are batched into one fig.add_traces() call below instead of being added
+    # one at a time — Plotly's add_trace() gets slower as the existing trace count
+    # grows (it revalidates the figure each call), so N individual calls scales worse
+    # than O(N) in practice. Batching also lets us cap chart devices (top_chart_devs)
+    # without losing the underlying fix's benefit for smaller device counts too.
+    pending_traces: list[tuple] = []  # (trace, row)
+
     if has_util:
         ref_lines[len(row_defs) + 1] = [
             (60, '#dc2626', 'heavily utilised (60%)'),
             (30, '#d97706', 'moderate (30%)'),
         ]
-        def _add_util(fig, r, devs=chart_devs):
+        def _add_util(fig, r, devs=top_chart_devs):
             for ci, dev in enumerate(devs):
-                d = dev_df[(dev_df['device'] == dev) & (dev_df['metric'] == '%util')].sort_values('dt')
-                if d.empty:
+                d = dev_groups.get((dev, '%util'))
+                if d is None or d.empty:
                     continue
-                fig.add_trace(go.Scatter(
+                pending_traces.append((go.Scatter(
                     x=d['dt'], y=d['value'], name=dev, mode='lines',
                     line=dict(color=COLORS[ci % len(COLORS)], width=1.5),
                     hovertemplate=f'<b>{dev}</b><br>%{{x}}<br>%{{y:.1f}}%<extra></extra>',
                     legendgroup=dev, showlegend=True,
-                ), row=r, col=1)
+                ), r))
             fig.update_yaxes(title_text='%util', showgrid=True, gridcolor='#e8edf5',
                              rangemode='tozero', row=r, col=1)
         row_defs.append(('Disk %util', _add_util))
@@ -236,51 +284,51 @@ async def analyze(section_text: str) -> str:
                 d = cpu_df[cpu_df['metric'] == metric].sort_values('dt')
                 if d.empty:
                     continue
-                fig.add_trace(go.Scatter(
+                pending_traces.append((go.Scatter(
                     x=d['dt'], y=d['value'], name=metric, mode='lines',
                     line=dict(color=color, width=1.5),
                     hovertemplate=f'<b>{metric}</b><br>%{{x}}<br>%{{y:.1f}}%<extra></extra>',
-                ), row=r, col=1)
+                ), r))
             fig.update_yaxes(title_text='%', showgrid=True, gridcolor='#e8edf5',
                              rangemode='tozero', row=r, col=1)
         row_defs.append(('CPU %iowait / %user / %system', _add_cpu))
 
     if has_iops:
         def _add_iops(fig, r):
-            for ci, dev in enumerate(chart_devs):
+            for ci, dev in enumerate(top_chart_devs):
                 for metric, dash in [('r/s', None), ('w/s', 'dot')]:
                     if metric not in dev_metrics:
                         continue
-                    d = dev_df[(dev_df['device'] == dev) & (dev_df['metric'] == metric)].sort_values('dt')
-                    if d.empty:
+                    d = dev_groups.get((dev, metric))
+                    if d is None or d.empty:
                         continue
-                    fig.add_trace(go.Scatter(
+                    pending_traces.append((go.Scatter(
                         x=d['dt'], y=d['value'], name=f'{dev} {metric}', mode='lines',
                         line=dict(color=COLORS[ci % len(COLORS)], width=1.2,
                                   **(dict(dash=dash) if dash else {})),
                         hovertemplate=f'<b>{dev} {metric}</b><br>%{{x}}<br>%{{y:.1f}}<extra></extra>',
                         legendgroup=f'{dev}_{metric}', showlegend=True,
-                    ), row=r, col=1)
+                    ), r))
             fig.update_yaxes(title_text='ops/s', showgrid=True, gridcolor='#e8edf5',
                              rangemode='tozero', row=r, col=1)
         row_defs.append(('IOPS (r/s solid, w/s dotted)', _add_iops))
 
     if has_thru_kb:
         def _add_thru(fig, r):
-            for ci, dev in enumerate(chart_devs):
+            for ci, dev in enumerate(top_chart_devs):
                 for metric, dash in [('rkB/s', None), ('wkB/s', 'dot')]:
                     if metric not in dev_metrics:
                         continue
-                    d = dev_df[(dev_df['device'] == dev) & (dev_df['metric'] == metric)].sort_values('dt')
-                    if d.empty:
+                    d = dev_groups.get((dev, metric))
+                    if d is None or d.empty:
                         continue
-                    fig.add_trace(go.Scatter(
+                    pending_traces.append((go.Scatter(
                         x=d['dt'], y=d['value'], name=f'{dev} {metric}', mode='lines',
                         line=dict(color=COLORS[ci % len(COLORS)], width=1.2,
                                   **(dict(dash=dash) if dash else {})),
                         hovertemplate=f'<b>{dev} {metric}</b><br>%{{x}}<br>%{{y:.1f}} kB/s<extra></extra>',
                         legendgroup=f'{dev}_{metric}', showlegend=True,
-                    ), row=r, col=1)
+                    ), r))
             fig.update_yaxes(title_text='kB/s', showgrid=True, gridcolor='#e8edf5',
                              rangemode='tozero', row=r, col=1)
         row_defs.append(('Throughput kB/s (read solid, write dotted)', _add_thru))
@@ -288,20 +336,20 @@ async def analyze(section_text: str) -> str:
     if has_await:
         ref_lines[len(row_defs) + 1] = [(1, '#64748b', '1 ms reference (SSD/NVMe target)')]
         def _add_await(fig, r):
-            for ci, dev in enumerate(chart_devs):
+            for ci, dev in enumerate(top_chart_devs):
                 for metric, dash in [('r_await', None), ('w_await', 'dot'), ('await', None)]:
                     if metric not in dev_metrics:
                         continue
-                    d = dev_df[(dev_df['device'] == dev) & (dev_df['metric'] == metric)].sort_values('dt')
-                    if d.empty:
+                    d = dev_groups.get((dev, metric))
+                    if d is None or d.empty:
                         continue
-                    fig.add_trace(go.Scatter(
+                    pending_traces.append((go.Scatter(
                         x=d['dt'], y=d['value'], name=f'{dev} {metric}', mode='lines',
                         line=dict(color=COLORS[ci % len(COLORS)], width=1.2,
                                   **(dict(dash=dash) if dash else {})),
                         hovertemplate=f'<b>{dev} {metric}</b><br>%{{x}}<br>%{{y:.2f}} ms<extra></extra>',
                         legendgroup=f'{dev}_{metric}', showlegend=True,
-                    ), row=r, col=1)
+                    ), r))
             fig.update_yaxes(title_text='ms', showgrid=True, gridcolor='#e8edf5',
                              rangemode='tozero', row=r, col=1)
         row_defs.append(('Latency ms (r_await solid, w_await dotted)', _add_await))
@@ -315,8 +363,14 @@ async def analyze(section_text: str) -> str:
         subplot_titles=[r[0] for r in row_defs],
         vertical_spacing=0.08 if nrows > 2 else 0.12,
     )
+    _t0 = time.monotonic()
     for row_idx, (_, fn) in enumerate(row_defs, start=1):
         fn(fig, row_idx)
+    if pending_traces:
+        fig.add_traces([t for t, _ in pending_traces], rows=[r for _, r in pending_traces],
+                        cols=[1] * len(pending_traces))
+    print(f'[timing] iostat: build {len(fig.data)} traces in {time.monotonic() - _t0:.2f}s '
+          f'(top {len(top_chart_devs)}/{len(chart_devs)} devices charted)', flush=True)
 
     for row_idx, lines in ref_lines.items():
         for y, color, label in lines:
@@ -338,11 +392,13 @@ async def analyze(section_text: str) -> str:
     )
     fig.update_xaxes(showgrid=True, gridcolor='#e8edf5', tickangle=-30)
 
+    _t0 = time.monotonic()
     chart_html = fig.to_html(
         full_html=False, include_plotlyjs=False,
         config={'displayModeBar': True, 'displaylogo': False,
                 'modeBarButtonsToRemove': ['select2d', 'lasso2d']},
     )
+    print(f'[timing] iostat: fig.to_html() {time.monotonic() - _t0:.2f}s ({len(chart_html):,} bytes)', flush=True)
 
     # %util table — physical devices only
     util_table = ''
@@ -372,7 +428,9 @@ async def analyze(section_text: str) -> str:
     n_phys = len(phys_devs)
     n_dm   = len(dm_devs)
     dev_note = (f'{n_phys} physical device(s)'
-                + (f' &mdash; {n_dm} dm device(s) hidden from charts' if n_dm else ''))
+                + (f' &mdash; {n_dm} dm device(s) hidden from charts' if n_dm else '')
+                + (f' &mdash; charts show top {len(top_chart_devs)} by %util '
+                   f'(table and insights below cover all)' if len(chart_devs) > len(top_chart_devs) else ''))
 
     return f'''
 <div style="margin:16px 0 24px 0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">

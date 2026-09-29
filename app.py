@@ -3,6 +3,7 @@ import asyncio
 import copy
 import os
 import re as _re
+import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -172,8 +173,10 @@ def _analyze_sync(fn, text: str) -> str:
 
 
 async def _run_analyzer(loop, section_id: str, fn, text: str):
+    t0 = time.monotonic()
     try:
         html = await loop.run_in_executor(_ANALYZER_POOL, _analyze_sync, fn, text)
+        print(f'[timing] analyzer {section_id}: {time.monotonic() - t0:.2f}s (input {len(text):,} bytes, {text.count(chr(10)):,} lines)', flush=True)
         return section_id, html
     except Exception:
         print(f'[analyzer] {section_id} EXCEPTION:\n{traceback.format_exc()}', flush=True)
@@ -183,8 +186,11 @@ async def _run_analyzer(loop, section_id: str, fn, text: str):
 async def _run_synthesis(loop, section_texts: dict):
     """Synthesis only needs section_texts, not the analyzers' HTML output, so it can
     run at the same time as the per-section analyzers instead of waiting for them."""
+    t0 = time.monotonic()
     try:
-        return await loop.run_in_executor(_EXECUTOR, _analyze_sync, synthesize, section_texts)
+        result = await loop.run_in_executor(_EXECUTOR, _analyze_sync, synthesize, section_texts)
+        print(f'[timing] synthesis: {time.monotonic() - t0:.2f}s', flush=True)
+        return result
     except Exception:
         print(f'[synthesis] EXCEPTION:\n{traceback.format_exc()}', flush=True)
         return ''
@@ -197,6 +203,7 @@ async def export_file(req: ExportRequest):
 
     header_html, sections = sessions[req.session_id]
     loop = asyncio.get_running_loop()
+    export_t0 = time.monotonic()
 
     async def _with_timeout(coro):
         try:
@@ -209,9 +216,12 @@ async def export_file(req: ExportRequest):
                 "'Charts only' instead of the full report.",
             )
 
+    t0 = time.monotonic()
     sections, section_texts = await _with_timeout(
         loop.run_in_executor(_EXECUTOR, _prepare_sections_sync, sections, req.selected_ids, req.time_from, req.time_to)
     )
+    print(f'[timing] prepare_sections: {time.monotonic() - t0:.2f}s '
+          f'({len(req.selected_ids)} selected, {sum(len(t) for t in section_texts.values()):,} total bytes)', flush=True)
 
     # Run all applicable analyzers for selected sections, each in its own worker
     # process (see _ANALYZER_POOL above for why processes rather than threads).
@@ -235,9 +245,11 @@ async def export_file(req: ExportRequest):
         analysis = {sid: _re.sub(r'<!--INS-->.*?<!--/INS-->', '', html, flags=_re.DOTALL)
                     for sid, html in analysis.items()}
 
+    t0 = time.monotonic()
     output_html = await _with_timeout(
         loop.run_in_executor(_EXECUTOR, build_output, header_html, sections, req.selected_ids, analysis, synthesis_html, req.mode)
     )
+    print(f'[timing] build_output: {time.monotonic() - t0:.2f}s ({len(output_html):,} bytes out)', flush=True)
 
     safe_name = Path(req.output_filename).name
     if not safe_name.endswith(".html"):
@@ -245,6 +257,8 @@ async def export_file(req: ExportRequest):
 
     out_path = OUTPUT_DIR / safe_name
     await loop.run_in_executor(_EXECUTOR, out_path.write_text, output_html, "utf-8")
+
+    print(f'[timing] TOTAL export: {time.monotonic() - export_t0:.2f}s', flush=True)
 
     return FileResponse(
         path=str(out_path),
