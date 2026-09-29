@@ -143,6 +143,8 @@ When adding a new time-filterable section, add a `filter_*` function and registe
 
 ## Analyzer system
 
+See [PERFORMANCE.md](PERFORMANCE.md) before writing or editing a chart-building loop over a per-device/per-instance list — it documents two anti-patterns (`fig.add_trace()` in a loop, filtering the same dataframe repeatedly instead of grouping once) found in `iostat.py` that turned a few seconds into two minutes on a report with many disk devices, plus the diagnostic approach (timing prints) that found them.
+
 **[analyzers/__init__.py](analyzers/__init__.py)** — `SECTION_ANALYZERS` maps section **ID** → `async analyze(section_text) -> str`.
 
 Each analyzer module (`analyzers/*.py`) exposes an `async analyze(section_text: str) -> str` that:
